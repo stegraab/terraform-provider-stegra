@@ -7,6 +7,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/mapplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/setplanmodifier"
@@ -30,6 +31,7 @@ type machineEnrollmentResourceModel struct {
 	AttestorClaims   types.Map    `tfsdk:"attestor_claims"`
 	MachineIdentity  types.String `tfsdk:"machine_identity"`
 	SSHPrincipals    types.Set    `tfsdk:"ssh_principals"`
+	Revoked          types.Bool   `tfsdk:"revoked"`
 	Status           types.String `tfsdk:"status"`
 }
 
@@ -69,6 +71,12 @@ func (r *machineEnrollmentResource) Schema(_ context.Context, _ resource.SchemaR
 			ElementType:   types.StringType,
 			PlanModifiers: []planmodifier.Set{setplanmodifier.RequiresReplace()},
 		},
+		"revoked": schema.BoolAttribute{
+			Optional:    true,
+			Computed:    true,
+			Default:     booldefault.StaticBool(false),
+			Description: "One-way emergency switch that revokes this enrollment. Recovery requires explicitly replacing the resource.",
+		},
 		"status": schema.StringAttribute{Computed: true},
 	}}
 }
@@ -89,6 +97,13 @@ func (r *machineEnrollmentResource) Create(ctx context.Context, req resource.Cre
 	var plan machineEnrollmentResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	if plan.Revoked.ValueBool() {
+		resp.Diagnostics.AddError(
+			"Cannot create a revoked machine enrollment",
+			"Set revoked to false to create the enrollment. Keep a revoked resource in state, and use explicit resource replacement only after the incident has been investigated.",
+		)
 		return
 	}
 	input, ok := expandMachineEnrollment(ctx, plan, resp)
@@ -137,8 +152,45 @@ func isInactiveMachineEnrollmentStatus(status string) bool {
 	return status == "expired" || status == "revoked"
 }
 
-func (r *machineEnrollmentResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError("Machine enrollment update is unsupported", "All configurable attributes require replacement.")
+func (r *machineEnrollmentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan, state machineEnrollmentResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if err := validateMachineEnrollmentRevocation(state.Revoked.ValueBool(), plan.Revoked.ValueBool()); err != nil {
+		resp.Diagnostics.AddError("Invalid machine enrollment revocation change", err.Error())
+		return
+	}
+	if !plan.Revoked.ValueBool() {
+		resp.Diagnostics.AddError("Machine enrollment update is unsupported", "All configurable attributes except revoked require replacement.")
+		return
+	}
+	if err := r.client.revokeMachineEnrollment(ctx, state.ID.ValueString()); err != nil {
+		resp.Diagnostics.AddError("Failed to revoke machine enrollment", err.Error())
+		return
+	}
+	registration, found, err := r.client.getMachineEnrollment(ctx, state.ID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Failed to read revoked machine enrollment", err.Error())
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError("Revoked machine enrollment disappeared", "The enrollment API did not retain the revoked registration audit record.")
+		return
+	}
+	resp.Diagnostics.Append(setMachineEnrollmentState(ctx, &plan, registration)...)
+	if !resp.Diagnostics.HasError() {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	}
+}
+
+func validateMachineEnrollmentRevocation(current, planned bool) error {
+	if current && !planned {
+		return fmt.Errorf("revocation cannot be reversed in place; remove revoked = true and explicitly replace the resource after investigating the incident")
+	}
+	return nil
 }
 
 func (r *machineEnrollmentResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -172,6 +224,7 @@ func setMachineEnrollmentState(ctx context.Context, state *machineEnrollmentReso
 	state.AttestorType = types.StringValue(registration.AttestorType)
 	state.AttestorIdentity = types.StringValue(registration.AttestorIdentity)
 	state.MachineIdentity = types.StringValue(registration.MachineIdentity)
+	state.Revoked = types.BoolValue(registration.Status == "revoked")
 	state.Status = types.StringValue(registration.Status)
 	claims, claimDiagnostics := types.MapValueFrom(ctx, types.StringType, registration.AttestorClaims)
 	diagnostics.Append(claimDiagnostics...)

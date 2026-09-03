@@ -46,6 +46,12 @@ Expired or revoked registrations remain in state with a warning so Terraform
 never silently authorizes a new identity. After investigation, recover with an
 explicit `terraform apply -replace=stegra_machine_enrollment.vm`.
 
+For incident response, set `revoked = true` and apply. This revokes the
+registration without removing it from Terraform state, preventing later normal
+applies from recreating it. Revocation is deliberately one-way. To recover after
+investigation, remove `revoked = true` and use the explicit replacement command
+above.
+
 ## Arguments
 
 - `attestor_type` — server-side platform verifier type.
@@ -53,6 +59,7 @@ explicit `terraform apply -replace=stegra_machine_enrollment.vm`.
 - `attestor_claims` — immutable platform facts verified during attestation.
 - `machine_identity` — requested machine identity.
 - `ssh_principals` — requested SSH host principals.
+- `revoked` — optional one-way emergency revocation switch; defaults to `false`.
 
 ## Read-only attributes
 

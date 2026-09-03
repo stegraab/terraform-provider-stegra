@@ -151,3 +151,16 @@ func TestInactiveMachineEnrollmentStatuses(t *testing.T) {
 		}
 	}
 }
+
+func TestMachineEnrollmentRevocationIsOneWay(t *testing.T) {
+	t.Parallel()
+	if err := validateMachineEnrollmentRevocation(false, true); err != nil {
+		t.Fatalf("revoke active enrollment: %v", err)
+	}
+	if err := validateMachineEnrollmentRevocation(true, true); err != nil {
+		t.Fatalf("retain revoked enrollment: %v", err)
+	}
+	if err := validateMachineEnrollmentRevocation(true, false); err == nil {
+		t.Fatal("expected in-place unrevocation to fail")
+	}
+}
