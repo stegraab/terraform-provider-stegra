@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -25,10 +26,6 @@ type stegraProvider struct {
 type stegraProviderModel struct {
 	MachineEnrollmentURL   types.String `tfsdk:"machine_enrollment_url"`
 	MachineEnrollmentToken types.String `tfsdk:"machine_enrollment_token"`
-	StepCAURL              types.String `tfsdk:"step_ca_url"`
-	StepCAAdminProvisioner types.String `tfsdk:"step_ca_admin_provisioner"`
-	StepCAAdminSubject     types.String `tfsdk:"step_ca_admin_subject"`
-	StepCAAdminPassword    types.String `tfsdk:"step_ca_admin_password"`
 	InsecureSkipVerify     types.Bool   `tfsdk:"insecure_skip_verify"`
 }
 
@@ -52,28 +49,11 @@ func (p *stegraProvider) Schema(_ context.Context, _ provider.SchemaRequest, res
 		"machine_enrollment_token": schema.StringAttribute{
 			Optional:    true,
 			Sensitive:   true,
-			Description: "Local-development token for machine enrollment. Production uses the Step CA administrator adapter.",
-		},
-		"step_ca_url": schema.StringAttribute{
-			Optional:    true,
-			Description: "Step CA base URL used to mint short-lived production administrator credentials.",
-		},
-		"step_ca_admin_provisioner": schema.StringAttribute{
-			Optional:    true,
-			Description: "Step CA JWK provisioner used for production machine-enrollment authorization.",
-		},
-		"step_ca_admin_subject": schema.StringAttribute{
-			Optional:    true,
-			Description: "Step CA administrator subject authorized to manage machine enrollments.",
-		},
-		"step_ca_admin_password": schema.StringAttribute{
-			Optional:    true,
-			Sensitive:   true,
-			Description: "Password used to decrypt the Step CA JWK provisioner private key.",
+			Description: "Static machine-enrollment token for local development only. Production uses ambient AWS credentials.",
 		},
 		"insecure_skip_verify": schema.BoolAttribute{
 			Optional:    true,
-			Description: "Disable TLS verification for local development only. Production Step CA authentication rejects this setting.",
+			Description: "Disable TLS verification for local development only. Production AWS IAM authentication rejects this setting.",
 		},
 	}}
 }
@@ -95,26 +75,6 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_token` is unknown")
 		return
 	}
-	stepCAURL, ok := configString(data.StepCAURL, "STEGRA_STEP_CA_URL", "")
-	if !ok {
-		resp.Diagnostics.AddError("Invalid provider configuration", "`step_ca_url` is unknown")
-		return
-	}
-	adminProvisioner, ok := configString(data.StepCAAdminProvisioner, "STEGRA_STEP_CA_ADMIN_PROVISIONER", "")
-	if !ok {
-		resp.Diagnostics.AddError("Invalid provider configuration", "`step_ca_admin_provisioner` is unknown")
-		return
-	}
-	adminSubject, ok := configString(data.StepCAAdminSubject, "STEGRA_STEP_CA_ADMIN_SUBJECT", "")
-	if !ok {
-		resp.Diagnostics.AddError("Invalid provider configuration", "`step_ca_admin_subject` is unknown")
-		return
-	}
-	adminPassword, ok := configString(data.StepCAAdminPassword, "STEGRA_STEP_CA_ADMIN_PASSWORD", "")
-	if !ok {
-		resp.Diagnostics.AddError("Invalid provider configuration", "`step_ca_admin_password` is unknown")
-		return
-	}
 	insecureSkipVerify, ok := configBool(data.InsecureSkipVerify, "STEGRA_INSECURE_SKIP_VERIFY", false)
 	if !ok {
 		resp.Diagnostics.AddError("Invalid provider configuration", "`insecure_skip_verify` is unknown")
@@ -126,39 +86,30 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		return
 	}
 
-	hasLocalToken := strings.TrimSpace(machineEnrollmentToken) != ""
-	stepFields := []string{stepCAURL, adminProvisioner, adminSubject, adminPassword}
-	hasAnyStepAuth := false
-	hasAllStepAuth := true
-	for _, field := range stepFields {
-		configured := strings.TrimSpace(field) != ""
-		hasAnyStepAuth = hasAnyStepAuth || configured
-		hasAllStepAuth = hasAllStepAuth && configured
-	}
-	if hasLocalToken && hasAnyStepAuth {
-		resp.Diagnostics.AddError("Ambiguous provider authentication", "Configure either the local machine-enrollment token or all Step CA administrator fields, not both.")
-		return
-	}
-	if !hasLocalToken && !hasAllStepAuth {
-		resp.Diagnostics.AddError("Incomplete production authentication", "Without `machine_enrollment_token`, configure `step_ca_url`, `step_ca_admin_provisioner`, `step_ca_admin_subject`, and `step_ca_admin_password`.")
-		return
-	}
-
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecureSkipVerify}
 	client := &apiClient{
 		machineEnrollmentURL:   normalizeURL(machineEnrollmentURL),
 		machineEnrollmentToken: strings.TrimSpace(machineEnrollmentToken),
-		stepCAURL:              normalizeURL(stepCAURL),
-		adminProvisioner:       strings.TrimSpace(adminProvisioner),
-		adminSubject:           strings.TrimSpace(adminSubject),
-		adminPassword:          adminPassword,
 		insecureSkipVerify:     insecureSkipVerify,
 		httpClient: &http.Client{
 			Timeout:       30 * time.Second,
 			Transport:     transport,
 			CheckRedirect: rejectRedirects,
 		},
+	}
+	if client.machineEnrollmentToken == "" {
+		awsConfig, err := config.LoadDefaultConfig(ctx)
+		if err != nil {
+			resp.Diagnostics.AddError("Failed to load AWS configuration", "Production machine enrollment uses ambient AWS credentials: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(awsConfig.Region) == "" {
+			resp.Diagnostics.AddError("Missing AWS region", "Production machine enrollment requires a region in the standard AWS configuration chain, for example AWS_REGION or the active AWS profile.")
+			return
+		}
+		client.awsRegion = awsConfig.Region
+		client.awsCredentials = awsConfig.Credentials
 	}
 	if err := client.validateTransport(); err != nil {
 		resp.Diagnostics.AddError("Invalid provider transport", err.Error())
