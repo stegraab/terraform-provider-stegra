@@ -11,11 +11,6 @@ terraform {
 
 provider "stegra" {
   machine_enrollment_url = "https://issuing-ca.example.internal/machine-enrollment"
-
-  step_ca_url               = "https://issuing-ca.example.internal"
-  step_ca_admin_provisioner = "Admin JWK"
-  step_ca_admin_subject     = "terraform-machine-enrollment"
-  step_ca_admin_password    = var.step_ca_admin_password
 }
 
 resource "stegra_machine_enrollment" "vm" {
@@ -32,9 +27,4 @@ resource "stegra_machine_enrollment" "vm" {
 
   machine_identity = "host/example.dev.se-bod.stegra.tech"
   ssh_principals   = ["example", "example.dev.se-bod.stegra.tech"]
-}
-
-variable "step_ca_admin_password" {
-  type      = string
-  sensitive = true
 }

@@ -2,10 +2,9 @@ package provider
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"go.step.sm/crypto/jose"
+	"github.com/aws/aws-sdk-go-v2/aws"
 )
 
 func TestMachineEnrollmentLifecycle(t *testing.T) {
@@ -73,13 +72,12 @@ func TestMachineEnrollmentLifecycle(t *testing.T) {
 func TestMachineEnrollmentTransportSecurity(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, enrollmentURL, localToken, stepCAURL string
-		insecure, wantError                        bool
+		name, enrollmentURL, localToken string
+		insecure, wantError             bool
 	}{
-		{name: "production HTTPS", enrollmentURL: "https://enroll.example", stepCAURL: "https://ca.example"},
-		{name: "production enrollment HTTP", enrollmentURL: "http://enroll.example", stepCAURL: "https://ca.example", wantError: true},
-		{name: "production Step CA HTTP", enrollmentURL: "https://enroll.example", stepCAURL: "http://ca.example", wantError: true},
-		{name: "production insecure TLS", enrollmentURL: "https://enroll.example", stepCAURL: "https://ca.example", insecure: true, wantError: true},
+		{name: "production HTTPS", enrollmentURL: "https://enroll.example"},
+		{name: "production enrollment HTTP", enrollmentURL: "http://enroll.example", wantError: true},
+		{name: "production insecure TLS", enrollmentURL: "https://enroll.example", insecure: true, wantError: true},
 		{name: "local HTTP", enrollmentURL: "http://127.0.0.1:8000", localToken: "local-token"},
 		{name: "invalid enrollment scheme", enrollmentURL: "file:///tmp/enrollment", localToken: "local-token", wantError: true},
 	}
@@ -89,7 +87,7 @@ func TestMachineEnrollmentTransportSecurity(t *testing.T) {
 			t.Parallel()
 			client := &apiClient{
 				machineEnrollmentURL: test.enrollmentURL, machineEnrollmentToken: test.localToken,
-				stepCAURL: test.stepCAURL, insecureSkipVerify: test.insecure,
+				insecureSkipVerify: test.insecure,
 			}
 			err := client.validateTransport()
 			if (err != nil) != test.wantError {
@@ -99,42 +97,92 @@ func TestMachineEnrollmentTransportSecurity(t *testing.T) {
 	}
 }
 
-func TestStepCAAdministratorJWTUsesValidationAudience(t *testing.T) {
+func TestAWSIAMProofIsBoundToMachineEnrollmentRequest(t *testing.T) {
 	t.Parallel()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	body := []byte(`{"machine_identity":"host/example.internal"}`)
 	client := &apiClient{
-		stepCAURL: "https://ca.example", adminSubject: "terraform-admin", adminSigner: key,
-		adminSignerAlg: jose.ES256, adminX5CCertChain: []string{"Y2VydA=="},
-		adminCertExpiry: time.Now().Add(time.Hour),
+		machineEnrollmentURL: "https://ca.example/machine-enrollment",
+		awsRegion:            "eu-north-1",
+		awsCredentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{
+				AccessKeyID: "AKIDEXAMPLE", SecretAccessKey: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+				SessionToken: "session-token",
+			}, nil
+		}),
+		now: func() time.Time { return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC) },
 	}
-	token, err := client.machineEnrollmentAuthorization(context.Background())
+	authorization, err := client.machineEnrollmentAuthorization(
+		context.Background(), http.MethodPost,
+		"https://ca.example/machine-enrollment/v1/machine-enrollments", body,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		t.Fatalf("unexpected JWT format: %q", token)
+	prefix := awsIAMAuthorizationScheme + " "
+	if !strings.HasPrefix(authorization, prefix) {
+		t.Fatalf("unexpected authorization scheme: %q", authorization)
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	encoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(authorization, prefix))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var claims struct {
-		Audience string `json:"aud"`
-		Subject  string `json:"sub"`
-		Issuer   string `json:"iss"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
+	var proof awsIAMProof
+	if err := json.Unmarshal(encoded, &proof); err != nil {
 		t.Fatal(err)
 	}
-	if claims.Audience != "https://ca.example/admin/admins" {
-		t.Fatalf("audience=%q", claims.Audience)
+	if proof.Method != http.MethodPost || proof.URL != "https://sts.eu-north-1.amazonaws.com/" || proof.Body != stsRequestBody {
+		t.Fatalf("unexpected STS proof: %#v", proof)
 	}
-	if claims.Subject != "terraform-admin" || claims.Issuer != stepAdminIssuer {
-		t.Fatalf("claims=%#v", claims)
+	expectedBodyDigest := sha256.Sum256(body)
+	wants := map[string]string{
+		"Host":                         "sts.eu-north-1.amazonaws.com",
+		"X-Amz-Date":                   "20260907T120000Z",
+		"X-Amz-Security-Token":         "session-token",
+		"X-Stegra-Audience":            "https://ca.example/machine-enrollment",
+		"X-Stegra-Request-Method":      http.MethodPost,
+		"X-Stegra-Request-URL":         "https://ca.example/machine-enrollment/v1/machine-enrollments",
+		"X-Stegra-Request-Body-SHA256": hex.EncodeToString(expectedBodyDigest[:]),
+	}
+	for header, want := range wants {
+		if got := proof.Headers.Get(header); got != want {
+			t.Errorf("%s=%q want %q", header, got, want)
+		}
+	}
+	if len(proof.Headers.Get("X-Stegra-Nonce")) < 32 {
+		t.Error("proof is missing a strong nonce")
+	}
+	signed := strings.ToLower(proof.Headers.Get("Authorization"))
+	for _, header := range []string{
+		"host", "x-amz-date", "x-amz-security-token", "x-stegra-audience",
+		"x-stegra-nonce", "x-stegra-request-body-sha256", "x-stegra-request-method",
+		"x-stegra-request-url",
+	} {
+		if !strings.Contains(signed, header) {
+			t.Errorf("AWS signature does not cover %s: %q", header, signed)
+		}
+	}
+}
+
+func TestAWSIAMProofUsesFreshNonce(t *testing.T) {
+	t.Parallel()
+	client := &apiClient{
+		machineEnrollmentURL: "https://ca.example/machine-enrollment",
+		awsRegion:            "eu-north-1",
+		awsCredentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+			return aws.Credentials{AccessKeyID: "key", SecretAccessKey: "secret"}, nil
+		}),
+		now: func() time.Time { return time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC) },
+	}
+	first, err := client.signAWSIAMProof(context.Background(), http.MethodGet, "https://ca.example/one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.signAWSIAMProof(context.Background(), http.MethodGet, "https://ca.example/one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Headers.Get("X-Stegra-Nonce") == second.Headers.Get("X-Stegra-Nonce") {
+		t.Fatal("AWS IAM proofs reused a nonce")
 	}
 }
 
