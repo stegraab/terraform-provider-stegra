@@ -12,6 +12,7 @@ nonce-bound PCR quote.
 
 ```hcl
 resource "stegra_machine_enrollment" "vm" {
+  endpoint          = "https://issuing-ca.example.internal/machine-enrollment"
   attestor_type     = "nutanix-vtpm"
   attestor_identity = nutanix_virtual_machine_v2.vm.bios_uuid
 
@@ -54,6 +55,7 @@ above.
 
 ## Arguments
 
+- `endpoint` — machine-enrollment API base URL. Production AWS-IAM authentication requires HTTPS with certificate verification.
 - `attestor_type` — server-side platform verifier type.
 - `attestor_identity` — stable identity observable by the attesting machine.
 - `attestor_claims` — immutable platform facts verified during attestation.

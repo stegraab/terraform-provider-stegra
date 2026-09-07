@@ -1,12 +1,23 @@
 package provider
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"testing"
 
+	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
+
+func TestProviderDoesNotOwnMachineEnrollmentEndpoint(t *testing.T) {
+	t.Parallel()
+	var response frameworkprovider.SchemaResponse
+	(&stegraProvider{}).Schema(context.Background(), frameworkprovider.SchemaRequest{}, &response)
+	if _, found := response.Schema.Attributes["machine_enrollment_url"]; found {
+		t.Fatal("machine_enrollment_url must be configured on the resource, not the provider")
+	}
+}
 
 func TestNormalizeURL(t *testing.T) {
 	t.Parallel()

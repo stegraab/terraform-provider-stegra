@@ -15,7 +15,7 @@ with this shape:
 
 The headers contain a SigV4 signature for AWS STS and these signed bindings:
 
-- `X-Stegra-Audience`: configured machine-enrollment base URL;
+- `X-Stegra-Audience`: machine-enrollment resource endpoint;
 - `X-Stegra-Request-Method`: broker operation method;
 - `X-Stegra-Request-URL`: complete broker operation URL;
 - `X-Stegra-Request-Body-SHA256`: SHA-256 of the exact broker request body;
