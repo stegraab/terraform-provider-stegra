@@ -27,12 +27,15 @@ Nested resources inherit it through normal Terraform provider propagation:
 ```hcl
 provider "stegra" {
   machine_enrollment_endpoint = "https://issuing-ca.example.internal/machine-enrollment"
+  aws_profile                 = "dev-boden-se"
 }
 ```
 
-The provider intentionally has no AWS credential attributes. Select credentials
-using the standard AWS environment and shared-config mechanisms, such as
-`AWS_PROFILE`. A region must be available through that same chain.
+The provider intentionally has no AWS credential attributes. `aws_profile` is
+only a non-secret selector for the standard AWS shared-config chain and lets a
+workspace use the same short-lived SSO or runner credentials as its AWS
+provider. It falls back to `AWS_PROFILE` and then the default AWS credential
+chain. A region must be available through that same chain.
 
 For local development only, set `machine_enrollment_token`. HTTP and
 `insecure_skip_verify` are rejected when using production AWS IAM authentication.
@@ -43,3 +46,4 @@ variables:
 - `STEGRA_MACHINE_ENROLLMENT_ENDPOINT`
 - `STEGRA_MACHINE_ENROLLMENT_TOKEN`
 - `STEGRA_INSECURE_SKIP_VERIFY`
+- `AWS_PROFILE`

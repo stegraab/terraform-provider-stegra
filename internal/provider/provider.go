@@ -26,6 +26,7 @@ type stegraProvider struct {
 type stegraProviderModel struct {
 	MachineEnrollmentEndpoint types.String `tfsdk:"machine_enrollment_endpoint"`
 	MachineEnrollmentToken    types.String `tfsdk:"machine_enrollment_token"`
+	AWSProfile                types.String `tfsdk:"aws_profile"`
 	InsecureSkipVerify        types.Bool   `tfsdk:"insecure_skip_verify"`
 }
 
@@ -51,6 +52,10 @@ func (p *stegraProvider) Schema(_ context.Context, _ provider.SchemaRequest, res
 			Sensitive:   true,
 			Description: "Static machine-enrollment token for local development only. Production uses ambient AWS credentials.",
 		},
+		"aws_profile": schema.StringAttribute{
+			Optional:    true,
+			Description: "AWS shared-config profile used to obtain short-lived credentials for machine-enrollment IAM proofs. Credentials are never stored by the provider.",
+		},
 		"insecure_skip_verify": schema.BoolAttribute{
 			Optional:    true,
 			Description: "Disable TLS verification for local development only. Production AWS IAM authentication rejects this setting.",
@@ -73,6 +78,11 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 	machineEnrollmentToken, ok := configString(data.MachineEnrollmentToken, "STEGRA_MACHINE_ENROLLMENT_TOKEN", "")
 	if !ok {
 		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_token` is unknown")
+		return
+	}
+	awsProfile, ok := configString(data.AWSProfile, "AWS_PROFILE", "")
+	if !ok {
+		resp.Diagnostics.AddError("Invalid provider configuration", "`aws_profile` is unknown")
 		return
 	}
 	insecureSkipVerify, ok := configBool(data.InsecureSkipVerify, "STEGRA_INSECURE_SKIP_VERIFY", false)
@@ -98,7 +108,11 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		},
 	}
 	if client.machineEnrollmentToken == "" {
-		awsConfig, err := config.LoadDefaultConfig(ctx)
+		loadOptions := []func(*config.LoadOptions) error{}
+		if strings.TrimSpace(awsProfile) != "" {
+			loadOptions = append(loadOptions, config.WithSharedConfigProfile(strings.TrimSpace(awsProfile)))
+		}
+		awsConfig, err := config.LoadDefaultConfig(ctx, loadOptions...)
 		if err != nil {
 			resp.Diagnostics.AddError("Failed to load AWS configuration", "Production machine enrollment uses ambient AWS credentials: "+err.Error())
 			return
