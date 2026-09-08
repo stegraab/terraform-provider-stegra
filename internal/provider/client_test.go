@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
 func TestMachineEnrollmentLifecycle(t *testing.T) {
@@ -211,18 +210,5 @@ func TestMachineEnrollmentRevocationIsOneWay(t *testing.T) {
 	}
 	if err := validateMachineEnrollmentRevocation(true, false); err == nil {
 		t.Fatal("expected in-place unrevocation to fail")
-	}
-}
-
-func TestEndpointMigrationDoesNotReplaceLegacyEnrollment(t *testing.T) {
-	t.Parallel()
-	if shouldReplaceMachineEnrollmentEndpoint(types.StringNull()) {
-		t.Fatal("legacy state without an endpoint must be adopted in place")
-	}
-	if shouldReplaceMachineEnrollmentEndpoint(types.StringUnknown()) {
-		t.Fatal("unknown legacy endpoint must not replace an enrollment")
-	}
-	if !shouldReplaceMachineEnrollmentEndpoint(types.StringValue("https://ca.example/machine-enrollment")) {
-		t.Fatal("changing an endpoint already stored in state must replace the enrollment")
 	}
 }

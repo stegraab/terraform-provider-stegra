@@ -21,9 +21,14 @@ method and URL, request-body hash, and a random nonce. The broker verifies those
 bindings, prevents nonce replay, calls AWS STS, and authorizes the returned IAM
 principal against its server-side policy.
 
-Production provider configuration can therefore remain empty: `provider
-"stegra" {}`. The machine-enrollment endpoint is configured on the resource
-that owns the integration.
+Configure the shared machine-enrollment endpoint once per Terraform workspace.
+Nested resources inherit it through normal Terraform provider propagation:
+
+```hcl
+provider "stegra" {
+  machine_enrollment_endpoint = "https://issuing-ca.example.internal/machine-enrollment"
+}
+```
 
 The provider intentionally has no AWS credential attributes. Select credentials
 using the standard AWS environment and shared-config mechanisms, such as
@@ -32,8 +37,9 @@ using the standard AWS environment and shared-config mechanisms, such as
 For local development only, set `machine_enrollment_token`. HTTP and
 `insecure_skip_verify` are rejected when using production AWS IAM authentication.
 
-The local-development attributes can be supplied through their corresponding
-environment variables:
+Provider attributes can be supplied through their corresponding environment
+variables:
 
+- `STEGRA_MACHINE_ENROLLMENT_ENDPOINT`
 - `STEGRA_MACHINE_ENROLLMENT_TOKEN`
 - `STEGRA_INSECURE_SKIP_VERIFY`

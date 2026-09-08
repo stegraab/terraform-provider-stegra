@@ -10,12 +10,12 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-func TestProviderDoesNotOwnMachineEnrollmentEndpoint(t *testing.T) {
+func TestProviderOwnsMachineEnrollmentEndpoint(t *testing.T) {
 	t.Parallel()
 	var response frameworkprovider.SchemaResponse
 	(&stegraProvider{}).Schema(context.Background(), frameworkprovider.SchemaRequest{}, &response)
-	if _, found := response.Schema.Attributes["machine_enrollment_url"]; found {
-		t.Fatal("machine_enrollment_url must be configured on the resource, not the provider")
+	if _, found := response.Schema.Attributes["machine_enrollment_endpoint"]; !found {
+		t.Fatal("machine_enrollment_endpoint must be configured once on the provider")
 	}
 }
 
