@@ -11,7 +11,6 @@ terraform {
 
 provider "stegra" {
   machine_enrollment_endpoint = "https://issuing-ca.example.internal/machine-enrollment"
-  aws_profile                 = "dev-boden-se"
 }
 
 resource "stegra_machine_enrollment" "vm" {

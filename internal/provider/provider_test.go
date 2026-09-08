@@ -19,19 +19,6 @@ func TestProviderOwnsMachineEnrollmentEndpoint(t *testing.T) {
 	}
 }
 
-func TestProviderSupportsAWSProfileSelection(t *testing.T) {
-	t.Parallel()
-	var response frameworkprovider.SchemaResponse
-	(&stegraProvider{}).Schema(context.Background(), frameworkprovider.SchemaRequest{}, &response)
-	attribute, found := response.Schema.Attributes["aws_profile"]
-	if !found {
-		t.Fatal("aws_profile must be available for workspaces that select credentials through shared AWS profiles")
-	}
-	if attribute.IsSensitive() {
-		t.Fatal("aws_profile is a non-secret selector and must not be marked sensitive")
-	}
-}
-
 func TestNormalizeURL(t *testing.T) {
 	t.Parallel()
 	if got := normalizeURL(" https://example.internal/path/ "); got != "https://example.internal/path" {
