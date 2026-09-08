@@ -73,6 +73,8 @@ func TestMachineEnrollmentTransportSecurity(t *testing.T) {
 		{name: "production enrollment HTTP", enrollmentURL: "http://enroll.example", wantError: true},
 		{name: "production insecure TLS", enrollmentURL: "https://enroll.example", insecure: true, wantError: true},
 		{name: "local HTTP", enrollmentURL: "http://127.0.0.1:8000", localToken: "local-token"},
+		{name: "local HTTPS", enrollmentURL: "https://localhost:8000", localToken: "local-token", insecure: true},
+		{name: "remote static token", enrollmentURL: "https://enroll.example", localToken: "local-token", wantError: true},
 		{name: "invalid enrollment scheme", enrollmentURL: "file:///tmp/enrollment", localToken: "local-token", wantError: true},
 	}
 	for _, test := range tests {

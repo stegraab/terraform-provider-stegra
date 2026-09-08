@@ -30,8 +30,9 @@ The Stegra CLI reuses a valid cached login and opens the normal browser login
 when necessary. The broker independently validates the token's signature,
 issuer, audience, lifetime, and administrator role.
 
-For local development only, set `machine_enrollment_token`. HTTP and
-`insecure_skip_verify` are rejected when using production OIDC authentication.
+For local development only, set `machine_enrollment_token`. Static tokens are
+restricted to loopback endpoints. HTTP and `insecure_skip_verify` are rejected
+when using production OIDC authentication.
 
 Provider attributes can be supplied through their corresponding environment
 variables:

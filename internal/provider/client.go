@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -157,6 +158,11 @@ func (c *apiClient) validateTransport() error {
 		return fmt.Errorf("machine enrollment URL: %w", err)
 	}
 	if _, ok := c.tokenSource.(staticTokenSource); ok {
+		hostname := enrollmentEndpoint.Hostname()
+		address := net.ParseIP(hostname)
+		if hostname != "localhost" && (address == nil || !address.IsLoopback()) {
+			return errors.New("static machine enrollment tokens are restricted to loopback endpoints")
+		}
 		return nil
 	}
 	if enrollmentEndpoint.Scheme != "https" {
