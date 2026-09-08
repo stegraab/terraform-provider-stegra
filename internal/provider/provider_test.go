@@ -58,3 +58,30 @@ func TestConfigString(t *testing.T) {
 		}
 	})
 }
+
+func TestKeycloakPasswordCredentials(t *testing.T) {
+	t.Run("not configured", func(t *testing.T) {
+		_ = os.Unsetenv("KEYCLOAK_USER")
+		_ = os.Unsetenv("KEYCLOAK_PASSWORD")
+		_, _, configured, err := keycloakPasswordCredentials()
+		if err != nil || configured {
+			t.Fatalf("configured=%v error=%v", configured, err)
+		}
+	})
+	t.Run("configured", func(t *testing.T) {
+		t.Setenv("KEYCLOAK_USER", "infrastructure-as-code-runner")
+		t.Setenv("KEYCLOAK_PASSWORD", "secret")
+		username, password, configured, err := keycloakPasswordCredentials()
+		if err != nil || !configured || username != "infrastructure-as-code-runner" || password != "secret" {
+			t.Fatalf("username=%q configured=%v error=%v", username, configured, err)
+		}
+	})
+	t.Run("partial configuration", func(t *testing.T) {
+		t.Setenv("KEYCLOAK_USER", "infrastructure-as-code-runner")
+		_ = os.Unsetenv("KEYCLOAK_PASSWORD")
+		_, _, _, err := keycloakPasswordCredentials()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+	})
+}

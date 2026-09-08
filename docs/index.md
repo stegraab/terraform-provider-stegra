@@ -30,6 +30,11 @@ The Stegra CLI reuses a valid cached login and opens the normal browser login
 when necessary. The broker independently validates the token's signature,
 issuer, audience, lifetime, and administrator role.
 
+In CI, the provider reuses the existing `KEYCLOAK_USER` and
+`KEYCLOAK_PASSWORD` runner credentials to obtain a short-lived `admin-cli`
+token. The password is never sent to the enrollment service or stored in
+Terraform state.
+
 For local development only, set `machine_enrollment_token`. Static tokens are
 restricted to loopback endpoints. HTTP and `insecure_skip_verify` are rejected
 when using production OIDC authentication.

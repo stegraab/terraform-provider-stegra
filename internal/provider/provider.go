@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -108,13 +109,42 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 	if strings.TrimSpace(machineEnrollmentToken) != "" {
 		client.tokenSource = staticTokenSource(strings.TrimSpace(machineEnrollmentToken))
 	} else {
-		client.tokenSource = &stegraCLITokenSource{authURL: normalizeURL(machineEnrollmentAuthURL)}
+		username, password, configured, err := keycloakPasswordCredentials()
+		if err != nil {
+			resp.Diagnostics.AddError("Invalid pipeline authentication", err.Error())
+			return
+		}
+		if configured {
+			client.tokenSource = &keycloakPasswordTokenSource{
+				authURL:    normalizeURL(machineEnrollmentAuthURL),
+				username:   username,
+				password:   password,
+				httpClient: client.httpClient,
+			}
+		} else {
+			client.tokenSource = &stegraCLITokenSource{authURL: normalizeURL(machineEnrollmentAuthURL)}
+		}
 	}
 	if err := client.validateTransport(); err != nil {
 		resp.Diagnostics.AddError("Invalid provider transport", err.Error())
 		return
 	}
 	resp.ResourceData = client
+}
+
+func keycloakPasswordCredentials() (string, string, bool, error) {
+	username, usernameConfigured := os.LookupEnv("KEYCLOAK_USER")
+	password, passwordConfigured := os.LookupEnv("KEYCLOAK_PASSWORD")
+	if usernameConfigured != passwordConfigured {
+		return "", "", false, errors.New("KEYCLOAK_USER and KEYCLOAK_PASSWORD must be configured together")
+	}
+	if !usernameConfigured {
+		return "", "", false, nil
+	}
+	if strings.TrimSpace(username) == "" || password == "" {
+		return "", "", false, errors.New("KEYCLOAK_USER and KEYCLOAK_PASSWORD must not be empty")
+	}
+	return strings.TrimSpace(username), password, true, nil
 }
 
 func (p *stegraProvider) Resources(_ context.Context) []func() resource.Resource {

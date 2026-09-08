@@ -36,6 +36,45 @@ type stegraCLITokenSource struct {
 	run     func(context.Context, string, ...string) ([]byte, error)
 }
 
+type keycloakPasswordTokenSource struct {
+	authURL, username, password string
+	httpClient                  *http.Client
+}
+
+func (s *keycloakPasswordTokenSource) Token(ctx context.Context) (string, error) {
+	form := url.Values{
+		"grant_type": {"password"},
+		"client_id":  {"admin-cli"},
+		"username":   {s.username},
+		"password":   {s.password},
+	}
+	endpoint := s.authURL + "/realms/master/protocol/openid-connect/token"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("build Keycloak token request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("obtain short-lived Keycloak access token: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("obtain short-lived Keycloak access token: status %d", response.StatusCode)
+	}
+	var tokenResponse struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&tokenResponse); err != nil {
+		return "", errors.New("Keycloak returned an invalid token response")
+	}
+	if strings.TrimSpace(tokenResponse.AccessToken) == "" {
+		return "", errors.New("Keycloak returned no access token")
+	}
+	return strings.TrimSpace(tokenResponse.AccessToken), nil
+}
+
 func (s *stegraCLITokenSource) Token(ctx context.Context) (string, error) {
 	if s.authURL == "" {
 		return "", errors.New("machine_enrollment_auth_url must be configured for production authentication")
@@ -171,8 +210,15 @@ func (c *apiClient) validateTransport() error {
 	if c.insecureSkipVerify {
 		return errors.New("production machine enrollment requires TLS certificate verification")
 	}
-	if source, ok := c.tokenSource.(*stegraCLITokenSource); ok {
-		authEndpoint, err := parseHTTPURL(source.authURL)
+	var authURL string
+	switch source := c.tokenSource.(type) {
+	case *stegraCLITokenSource:
+		authURL = source.authURL
+	case *keycloakPasswordTokenSource:
+		authURL = source.authURL
+	}
+	if authURL != "" {
+		authEndpoint, err := parseHTTPURL(authURL)
 		if err != nil {
 			return fmt.Errorf("machine enrollment auth URL: %w", err)
 		}

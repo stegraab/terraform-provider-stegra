@@ -147,6 +147,52 @@ func TestStegraCLITokenSourceDoesNotExposeOutputOnFailure(t *testing.T) {
 	}
 }
 
+func TestKeycloakPasswordTokenSource(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/realms/master/protocol/openid-connect/token" {
+			t.Errorf("path=%q", request.URL.Path)
+		}
+		if err := request.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]string{
+			"grant_type": "password", "client_id": "admin-cli",
+			"username": "infrastructure-as-code-runner", "password": "pipeline-secret",
+		}
+		for key, value := range want {
+			if request.Form.Get(key) != value {
+				t.Errorf("%s=%q", key, request.Form.Get(key))
+			}
+		}
+		_ = json.NewEncoder(writer).Encode(map[string]string{"access_token": "short-lived-token"})
+	}))
+	defer server.Close()
+	source := &keycloakPasswordTokenSource{
+		authURL: server.URL, username: "infrastructure-as-code-runner",
+		password: "pipeline-secret", httpClient: server.Client(),
+	}
+	token, err := source.Token(context.Background())
+	if err != nil || token != "short-lived-token" {
+		t.Fatalf("token=%q error=%v", token, err)
+	}
+}
+
+func TestKeycloakPasswordTokenSourceDoesNotExposeResponse(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "must-not-appear", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	source := &keycloakPasswordTokenSource{
+		authURL: server.URL, username: "runner", password: "secret", httpClient: server.Client(),
+	}
+	_, err := source.Token(context.Background())
+	if err == nil || err.Error() != "obtain short-lived Keycloak access token: status 401" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 func TestInactiveMachineEnrollmentStatuses(t *testing.T) {
 	t.Parallel()
 	for _, status := range []string{"expired", "revoked"} {
