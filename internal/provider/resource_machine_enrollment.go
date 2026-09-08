@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	_ resource.Resource              = &machineEnrollmentResource{}
-	_ resource.ResourceWithConfigure = &machineEnrollmentResource{}
+	_ resource.Resource                 = &machineEnrollmentResource{}
+	_ resource.ResourceWithConfigure    = &machineEnrollmentResource{}
+	_ resource.ResourceWithUpgradeState = &machineEnrollmentResource{}
 )
 
 type machineEnrollmentResource struct {
@@ -25,6 +26,17 @@ type machineEnrollmentResource struct {
 }
 
 type machineEnrollmentResourceModel struct {
+	ID               types.String `tfsdk:"id"`
+	AttestorType     types.String `tfsdk:"attestor_type"`
+	AttestorIdentity types.String `tfsdk:"attestor_identity"`
+	AttestorClaims   types.Map    `tfsdk:"attestor_claims"`
+	MachineIdentity  types.String `tfsdk:"machine_identity"`
+	SSHPrincipals    types.Set    `tfsdk:"ssh_principals"`
+	Revoked          types.Bool   `tfsdk:"revoked"`
+	Status           types.String `tfsdk:"status"`
+}
+
+type machineEnrollmentResourceModelV0 struct {
 	ID               types.String `tfsdk:"id"`
 	Endpoint         types.String `tfsdk:"endpoint"`
 	AttestorType     types.String `tfsdk:"attestor_type"`
@@ -45,22 +57,16 @@ func (r *machineEnrollmentResource) Metadata(_ context.Context, req resource.Met
 }
 
 func (r *machineEnrollmentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
-	resp.Schema = schema.Schema{Attributes: map[string]schema.Attribute{
+	resp.Schema = machineEnrollmentSchema()
+}
+
+func machineEnrollmentSchema() schema.Schema {
+	return schema.Schema{Version: 1, Attributes: machineEnrollmentAttributes()}
+}
+
+func machineEnrollmentAttributes() map[string]schema.Attribute {
+	return map[string]schema.Attribute{
 		"id": schema.StringAttribute{Computed: true},
-		"endpoint": schema.StringAttribute{
-			Required:    true,
-			Description: "Stegra machine-enrollment API base URL.",
-			PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplaceIf(
-				func(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
-					// Provider versions before v0.1.3 stored the endpoint only in
-					// provider configuration. Adopt it into legacy resource state
-					// without revoking and recreating existing enrollments.
-					resp.RequiresReplace = shouldReplaceMachineEnrollmentEndpoint(req.StateValue)
-				},
-				"Changing an endpoint already recorded in state replaces the enrollment; adding it to legacy state does not.",
-				"Changing an endpoint already recorded in state replaces the enrollment; adding it to legacy state does not.",
-			)},
-		},
 		"attestor_type": schema.StringAttribute{
 			Required:      true,
 			Description:   "Platform attestor type, for example nutanix-vtpm.",
@@ -93,11 +99,35 @@ func (r *machineEnrollmentResource) Schema(_ context.Context, _ resource.SchemaR
 			Description: "One-way emergency switch that revokes this enrollment. Recovery requires explicitly replacing the resource.",
 		},
 		"status": schema.StringAttribute{Computed: true},
-	}}
+	}
 }
 
-func shouldReplaceMachineEnrollmentEndpoint(stateValue types.String) bool {
-	return !stateValue.IsNull() && !stateValue.IsUnknown()
+func (r *machineEnrollmentResource) UpgradeState(ctx context.Context) map[int64]resource.StateUpgrader {
+	priorSchema := schema.Schema{Version: 0, Attributes: machineEnrollmentAttributes()}
+	priorSchema.Attributes["endpoint"] = schema.StringAttribute{Required: true}
+	return map[int64]resource.StateUpgrader{
+		0: {
+			PriorSchema: &priorSchema,
+			StateUpgrader: func(ctx context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
+				var prior machineEnrollmentResourceModelV0
+				resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+				if resp.Diagnostics.HasError() {
+					return
+				}
+				upgraded := machineEnrollmentResourceModel{
+					ID:               prior.ID,
+					AttestorType:     prior.AttestorType,
+					AttestorIdentity: prior.AttestorIdentity,
+					AttestorClaims:   prior.AttestorClaims,
+					MachineIdentity:  prior.MachineIdentity,
+					SSHPrincipals:    prior.SSHPrincipals,
+					Revoked:          prior.Revoked,
+					Status:           prior.Status,
+				}
+				resp.Diagnostics.Append(resp.State.Set(ctx, &upgraded)...)
+			},
+		},
+	}
 }
 
 func (r *machineEnrollmentResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -129,12 +159,7 @@ func (r *machineEnrollmentResource) Create(ctx context.Context, req resource.Cre
 	if !ok {
 		return
 	}
-	client, err := r.clientFor(plan.Endpoint.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid machine enrollment endpoint", err.Error())
-		return
-	}
-	created, err := client.createMachineEnrollment(ctx, input)
+	created, err := r.client.createMachineEnrollment(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create machine enrollment", err.Error())
 		return
@@ -151,17 +176,7 @@ func (r *machineEnrollmentResource) Read(ctx context.Context, req resource.ReadR
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if state.Endpoint.IsNull() || state.Endpoint.IsUnknown() {
-		// Legacy state cannot recover the former provider-level endpoint.
-		// Preserve it until Update adopts the endpoint from configuration.
-		return
-	}
-	client, err := r.clientFor(state.Endpoint.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid machine enrollment endpoint", err.Error())
-		return
-	}
-	registration, found, err := client.getMachineEnrollment(ctx, state.ID.ValueString())
+	registration, found, err := r.client.getMachineEnrollment(ctx, state.ID.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to read machine enrollment", err.Error())
 		return
@@ -197,42 +212,15 @@ func (r *machineEnrollmentResource) Update(ctx context.Context, req resource.Upd
 		resp.Diagnostics.AddError("Invalid machine enrollment revocation change", err.Error())
 		return
 	}
-	legacyEndpointMigration := state.Endpoint.IsNull() || state.Endpoint.IsUnknown()
-	if legacyEndpointMigration && !plan.Revoked.ValueBool() {
-		client, err := r.clientFor(plan.Endpoint.ValueString())
-		if err != nil {
-			resp.Diagnostics.AddError("Invalid machine enrollment endpoint", err.Error())
-			return
-		}
-		registration, found, err := client.getMachineEnrollment(ctx, state.ID.ValueString())
-		if err != nil {
-			resp.Diagnostics.AddError("Failed to read machine enrollment", err.Error())
-			return
-		}
-		if !found {
-			resp.State.RemoveResource(ctx)
-			return
-		}
-		resp.Diagnostics.Append(setMachineEnrollmentState(ctx, &plan, registration)...)
-		if !resp.Diagnostics.HasError() {
-			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-		}
-		return
-	}
 	if !plan.Revoked.ValueBool() {
 		resp.Diagnostics.AddError("Machine enrollment update is unsupported", "All configurable attributes except revoked require replacement.")
 		return
 	}
-	client, err := r.clientFor(plan.Endpoint.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid machine enrollment endpoint", err.Error())
-		return
-	}
-	if err := client.revokeMachineEnrollment(ctx, state.ID.ValueString()); err != nil {
+	if err := r.client.revokeMachineEnrollment(ctx, state.ID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Failed to revoke machine enrollment", err.Error())
 		return
 	}
-	registration, found, err := client.getMachineEnrollment(ctx, state.ID.ValueString())
+	registration, found, err := r.client.getMachineEnrollment(ctx, state.ID.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to read revoked machine enrollment", err.Error())
 		return
@@ -260,23 +248,9 @@ func (r *machineEnrollmentResource) Delete(ctx context.Context, req resource.Del
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	client, err := r.clientFor(state.Endpoint.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid machine enrollment endpoint", err.Error())
-		return
-	}
-	if err := client.revokeMachineEnrollment(ctx, state.ID.ValueString()); err != nil {
+	if err := r.client.revokeMachineEnrollment(ctx, state.ID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Failed to revoke machine enrollment", err.Error())
 	}
-}
-
-func (r *machineEnrollmentResource) clientFor(endpoint string) (*apiClient, error) {
-	client := *r.client
-	client.machineEnrollmentURL = normalizeURL(endpoint)
-	if err := client.validateTransport(); err != nil {
-		return nil, err
-	}
-	return &client, nil
 }
 
 func expandMachineEnrollment(ctx context.Context, plan machineEnrollmentResourceModel, resp *resource.CreateResponse) (machineEnrollment, bool) {

@@ -9,10 +9,11 @@ terraform {
   }
 }
 
-provider "stegra" {}
+provider "stegra" {
+  machine_enrollment_endpoint = "https://issuing-ca.example.internal/machine-enrollment"
+}
 
 resource "stegra_machine_enrollment" "vm" {
-  endpoint          = "https://issuing-ca.example.internal/machine-enrollment"
   attestor_type     = "nutanix-vtpm"
   attestor_identity = nutanix_virtual_machine_v2.vm.bios_uuid
   attestor_claims = {

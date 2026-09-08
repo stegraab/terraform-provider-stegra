@@ -24,8 +24,9 @@ type stegraProvider struct {
 }
 
 type stegraProviderModel struct {
-	MachineEnrollmentToken types.String `tfsdk:"machine_enrollment_token"`
-	InsecureSkipVerify     types.Bool   `tfsdk:"insecure_skip_verify"`
+	MachineEnrollmentEndpoint types.String `tfsdk:"machine_enrollment_endpoint"`
+	MachineEnrollmentToken    types.String `tfsdk:"machine_enrollment_token"`
+	InsecureSkipVerify        types.Bool   `tfsdk:"insecure_skip_verify"`
 }
 
 func New(version string) func() provider.Provider {
@@ -41,6 +42,10 @@ func (p *stegraProvider) Metadata(_ context.Context, _ provider.MetadataRequest,
 
 func (p *stegraProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{Attributes: map[string]schema.Attribute{
+		"machine_enrollment_endpoint": schema.StringAttribute{
+			Required:    true,
+			Description: "Shared Stegra machine-enrollment API base URL for resources managed by this provider.",
+		},
 		"machine_enrollment_token": schema.StringAttribute{
 			Optional:    true,
 			Sensitive:   true,
@@ -60,6 +65,11 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		return
 	}
 
+	machineEnrollmentEndpoint, ok := configString(data.MachineEnrollmentEndpoint, "STEGRA_MACHINE_ENROLLMENT_ENDPOINT", "")
+	if !ok {
+		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_endpoint` is unknown")
+		return
+	}
 	machineEnrollmentToken, ok := configString(data.MachineEnrollmentToken, "STEGRA_MACHINE_ENROLLMENT_TOKEN", "")
 	if !ok {
 		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_token` is unknown")
@@ -70,10 +80,15 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		resp.Diagnostics.AddError("Invalid provider configuration", "`insecure_skip_verify` is unknown")
 		return
 	}
+	if strings.TrimSpace(machineEnrollmentEndpoint) == "" {
+		resp.Diagnostics.AddError("Missing provider configuration", "`machine_enrollment_endpoint` must be configured")
+		return
+	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecureSkipVerify}
 	client := &apiClient{
+		machineEnrollmentURL:   normalizeURL(machineEnrollmentEndpoint),
 		machineEnrollmentToken: strings.TrimSpace(machineEnrollmentToken),
 		insecureSkipVerify:     insecureSkipVerify,
 		httpClient: &http.Client{
@@ -95,8 +110,8 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		client.awsRegion = awsConfig.Region
 		client.awsCredentials = awsConfig.Credentials
 	}
-	if client.machineEnrollmentToken == "" && client.insecureSkipVerify {
-		resp.Diagnostics.AddError("Invalid provider transport", "production machine enrollment requires TLS certificate verification")
+	if err := client.validateTransport(); err != nil {
+		resp.Diagnostics.AddError("Invalid provider transport", err.Error())
 		return
 	}
 	resp.ResourceData = client
