@@ -11,6 +11,7 @@ terraform {
 
 provider "stegra" {
   machine_enrollment_endpoint = "https://issuing-ca.example.internal/machine-enrollment"
+  machine_enrollment_auth_url = "https://auth.example.internal"
 }
 
 resource "stegra_machine_enrollment" "vm" {

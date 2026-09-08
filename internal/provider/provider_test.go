@@ -17,6 +17,9 @@ func TestProviderOwnsMachineEnrollmentEndpoint(t *testing.T) {
 	if _, found := response.Schema.Attributes["machine_enrollment_endpoint"]; !found {
 		t.Fatal("machine_enrollment_endpoint must be configured once on the provider")
 	}
+	if _, found := response.Schema.Attributes["machine_enrollment_auth_url"]; !found {
+		t.Fatal("machine_enrollment_auth_url must be configured once on the provider")
+	}
 }
 
 func TestNormalizeURL(t *testing.T) {
