@@ -3,37 +3,116 @@ package provider
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"strings"
-	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsV4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
-)
-
-const (
-	awsIAMAuthorizationScheme = "AWS-IAM"
-	stsRequestBody            = "Action=GetCallerIdentity&Version=2011-06-15"
 )
 
 type apiClient struct {
-	machineEnrollmentURL   string
-	machineEnrollmentToken string
-	awsRegion              string
-	awsCredentials         aws.CredentialsProvider
-	insecureSkipVerify     bool
-	httpClient             *http.Client
-	now                    func() time.Time
+	machineEnrollmentURL string
+	tokenSource          tokenSource
+	insecureSkipVerify   bool
+	httpClient           *http.Client
+}
+
+type tokenSource interface {
+	Token(context.Context) (string, error)
+}
+
+type staticTokenSource string
+
+func (s staticTokenSource) Token(context.Context) (string, error) {
+	return string(s), nil
+}
+
+type stegraCLITokenSource struct {
+	authURL string
+	run     func(context.Context, string, ...string) ([]byte, error)
+}
+
+type keycloakPasswordTokenSource struct {
+	authURL, username, password string
+	httpClient                  *http.Client
+}
+
+func (s *keycloakPasswordTokenSource) Token(ctx context.Context) (string, error) {
+	form := url.Values{
+		"grant_type": {"password"},
+		"client_id":  {"terraform-ci"},
+		"username":   {s.username},
+		"password":   {s.password},
+	}
+	endpoint := s.authURL + "/realms/master/protocol/openid-connect/token"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("build Keycloak token request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response, err := s.httpClient.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("obtain short-lived Keycloak access token: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", fmt.Errorf("obtain short-lived Keycloak access token: status %d", response.StatusCode)
+	}
+	var tokenResponse struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&tokenResponse); err != nil {
+		return "", errors.New("Keycloak returned an invalid token response")
+	}
+	if strings.TrimSpace(tokenResponse.AccessToken) == "" {
+		return "", errors.New("Keycloak returned no access token")
+	}
+	return strings.TrimSpace(tokenResponse.AccessToken), nil
+}
+
+func (s *stegraCLITokenSource) Token(ctx context.Context) (string, error) {
+	if s.authURL == "" {
+		return "", errors.New("machine_enrollment_auth_url must be configured for production authentication")
+	}
+	run := s.run
+	if run == nil {
+		run = commandOutput
+	}
+	output, err := run(
+		ctx,
+		"stegra",
+		"auth",
+		"stegra",
+		"--base-url",
+		s.authURL,
+		"--realm",
+		"master",
+		"--client-id",
+		"stegra-cli",
+		"--token-only",
+	)
+	if err != nil {
+		return "", fmt.Errorf("obtain short-lived Stegra access token: %w", err)
+	}
+	var response struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		return "", errors.New("stegra auth returned invalid JSON")
+	}
+	if strings.TrimSpace(response.AccessToken) == "" {
+		return "", errors.New("stegra auth returned no access token")
+	}
+	return strings.TrimSpace(response.AccessToken), nil
+}
+
+func commandOutput(ctx context.Context, name string, arguments ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, arguments...).Output()
 }
 
 type machineEnrollment struct {
@@ -44,16 +123,6 @@ type machineEnrollment struct {
 	MachineIdentity  string            `json:"machine_identity"`
 	SSHPrincipals    []string          `json:"ssh_principals"`
 	Status           string            `json:"status,omitempty"`
-}
-
-// awsIAMProof follows the established AWS IAM authentication pattern: the
-// broker validates the signed context, sends this exact request to AWS STS, and
-// authorizes the principal returned by GetCallerIdentity.
-type awsIAMProof struct {
-	Method  string      `json:"method"`
-	URL     string      `json:"url"`
-	Headers http.Header `json:"headers"`
-	Body    string      `json:"body"`
 }
 
 type apiStatusError struct {
@@ -104,7 +173,7 @@ func (c *apiClient) requestMachineEnrollment(ctx context.Context, method string,
 		}
 	}
 	endpoint := c.machineEnrollmentURL + path
-	authorization, err := c.machineEnrollmentAuthorization(ctx, method, endpoint, requestBody)
+	authorization, err := c.machineEnrollmentAuthorization(ctx)
 	if err != nil {
 		return machineEnrollment{}, err
 	}
@@ -127,7 +196,12 @@ func (c *apiClient) validateTransport() error {
 	if err != nil {
 		return fmt.Errorf("machine enrollment URL: %w", err)
 	}
-	if c.machineEnrollmentToken != "" {
+	if _, ok := c.tokenSource.(staticTokenSource); ok {
+		hostname := enrollmentEndpoint.Hostname()
+		address := net.ParseIP(hostname)
+		if hostname != "localhost" && (address == nil || !address.IsLoopback()) {
+			return errors.New("static machine enrollment tokens are restricted to loopback endpoints")
+		}
 		return nil
 	}
 	if enrollmentEndpoint.Scheme != "https" {
@@ -135,6 +209,22 @@ func (c *apiClient) validateTransport() error {
 	}
 	if c.insecureSkipVerify {
 		return errors.New("production machine enrollment requires TLS certificate verification")
+	}
+	var authURL string
+	switch source := c.tokenSource.(type) {
+	case *stegraCLITokenSource:
+		authURL = source.authURL
+	case *keycloakPasswordTokenSource:
+		authURL = source.authURL
+	}
+	if authURL != "" {
+		authEndpoint, err := parseHTTPURL(authURL)
+		if err != nil {
+			return fmt.Errorf("machine enrollment auth URL: %w", err)
+		}
+		if authEndpoint.Scheme != "https" {
+			return errors.New("production machine enrollment authentication requires HTTPS")
+		}
 	}
 	return nil
 }
@@ -147,66 +237,18 @@ func parseHTTPURL(raw string) (*url.URL, error) {
 	return endpoint, nil
 }
 
-func (c *apiClient) machineEnrollmentAuthorization(ctx context.Context, method string, endpoint string, body []byte) (string, error) {
-	if c.machineEnrollmentToken != "" {
-		return c.machineEnrollmentToken, nil
+func (c *apiClient) machineEnrollmentAuthorization(ctx context.Context) (string, error) {
+	if c.tokenSource == nil {
+		return "", errors.New("machine enrollment authentication is not configured")
 	}
-	proof, err := c.signAWSIAMProof(ctx, method, endpoint, body)
+	token, err := c.tokenSource.Token(ctx)
 	if err != nil {
 		return "", err
 	}
-	encoded, err := json.Marshal(proof)
-	if err != nil {
-		return "", fmt.Errorf("encode AWS IAM proof: %w", err)
+	if strings.HasPrefix(token, "Bearer ") {
+		return token, nil
 	}
-	return awsIAMAuthorizationScheme + " " + base64.RawURLEncoding.EncodeToString(encoded), nil
-}
-
-func (c *apiClient) signAWSIAMProof(ctx context.Context, method string, endpoint string, body []byte) (awsIAMProof, error) {
-	if c.awsCredentials == nil {
-		return awsIAMProof{}, errors.New("AWS credentials are not configured")
-	}
-	credentials, err := c.awsCredentials.Retrieve(ctx)
-	if err != nil {
-		return awsIAMProof{}, fmt.Errorf("retrieve ambient AWS credentials: %w", err)
-	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return awsIAMProof{}, fmt.Errorf("generate AWS IAM proof nonce: %w", err)
-	}
-	bodyDigest := sha256.Sum256(body)
-	stsEndpoint, err := sts.NewDefaultEndpointResolverV2().ResolveEndpoint(
-		ctx,
-		sts.EndpointParameters{Region: aws.String(c.awsRegion)},
-	)
-	if err != nil {
-		return awsIAMProof{}, fmt.Errorf("resolve AWS STS endpoint: %w", err)
-	}
-	stsEndpoint.URI.Path = "/"
-	stsEndpoint.URI.RawQuery = ""
-	stsEndpoint.URI.Fragment = ""
-	stsURL := stsEndpoint.URI.String()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, stsURL, strings.NewReader(stsRequestBody))
-	if err != nil {
-		return awsIAMProof{}, fmt.Errorf("build AWS STS identity request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
-	request.Header.Set("X-Stegra-Audience", c.machineEnrollmentURL)
-	request.Header.Set("X-Stegra-Request-Method", method)
-	request.Header.Set("X-Stegra-Request-URL", endpoint)
-	request.Header.Set("X-Stegra-Request-Body-SHA256", hex.EncodeToString(bodyDigest[:]))
-	request.Header.Set("X-Stegra-Nonce", base64.RawURLEncoding.EncodeToString(nonce))
-	stsBodyDigest := sha256.Sum256([]byte(stsRequestBody))
-	signingTime := time.Now().UTC()
-	if c.now != nil {
-		signingTime = c.now().UTC()
-	}
-	if err := awsV4.NewSigner().SignHTTP(ctx, credentials, request, hex.EncodeToString(stsBodyDigest[:]), "sts", c.awsRegion, signingTime); err != nil {
-		return awsIAMProof{}, fmt.Errorf("sign AWS STS identity request: %w", err)
-	}
-	headers := request.Header.Clone()
-	headers.Set("Host", request.URL.Host)
-	return awsIAMProof{Method: http.MethodPost, URL: stsURL, Headers: headers, Body: stsRequestBody}, nil
+	return "Bearer " + token, nil
 }
 
 func (c *apiClient) request(ctx context.Context, method string, endpoint string, body []byte, authorization string) ([]byte, error) {

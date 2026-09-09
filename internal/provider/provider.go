@@ -3,13 +3,13 @@ package provider
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -26,6 +26,7 @@ type stegraProvider struct {
 type stegraProviderModel struct {
 	MachineEnrollmentEndpoint types.String `tfsdk:"machine_enrollment_endpoint"`
 	MachineEnrollmentToken    types.String `tfsdk:"machine_enrollment_token"`
+	MachineEnrollmentAuthURL  types.String `tfsdk:"machine_enrollment_auth_url"`
 	InsecureSkipVerify        types.Bool   `tfsdk:"insecure_skip_verify"`
 }
 
@@ -49,11 +50,15 @@ func (p *stegraProvider) Schema(_ context.Context, _ provider.SchemaRequest, res
 		"machine_enrollment_token": schema.StringAttribute{
 			Optional:    true,
 			Sensitive:   true,
-			Description: "Static machine-enrollment token for local development only. Production uses ambient AWS credentials.",
+			Description: "Static machine-enrollment token for local development only. Production obtains a short-lived token with the Stegra CLI.",
+		},
+		"machine_enrollment_auth_url": schema.StringAttribute{
+			Optional:    true,
+			Description: "Stegra identity-provider base URL used by `stegra auth stegra` for production machine-enrollment authentication.",
 		},
 		"insecure_skip_verify": schema.BoolAttribute{
 			Optional:    true,
-			Description: "Disable TLS verification for local development only. Production AWS IAM authentication rejects this setting.",
+			Description: "Disable TLS verification for local development only. Production OIDC authentication rejects this setting.",
 		},
 	}}
 }
@@ -75,6 +80,11 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_token` is unknown")
 		return
 	}
+	machineEnrollmentAuthURL, ok := configString(data.MachineEnrollmentAuthURL, "STEGRA_MACHINE_ENROLLMENT_AUTH_URL", "")
+	if !ok {
+		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_auth_url` is unknown")
+		return
+	}
 	insecureSkipVerify, ok := configBool(data.InsecureSkipVerify, "STEGRA_INSECURE_SKIP_VERIFY", false)
 	if !ok {
 		resp.Diagnostics.AddError("Invalid provider configuration", "`insecure_skip_verify` is unknown")
@@ -88,33 +98,53 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecureSkipVerify}
 	client := &apiClient{
-		machineEnrollmentURL:   normalizeURL(machineEnrollmentEndpoint),
-		machineEnrollmentToken: strings.TrimSpace(machineEnrollmentToken),
-		insecureSkipVerify:     insecureSkipVerify,
+		machineEnrollmentURL: normalizeURL(machineEnrollmentEndpoint),
+		insecureSkipVerify:   insecureSkipVerify,
 		httpClient: &http.Client{
 			Timeout:       30 * time.Second,
 			Transport:     transport,
 			CheckRedirect: rejectRedirects,
 		},
 	}
-	if client.machineEnrollmentToken == "" {
-		awsConfig, err := config.LoadDefaultConfig(ctx)
+	if strings.TrimSpace(machineEnrollmentToken) != "" {
+		client.tokenSource = staticTokenSource(strings.TrimSpace(machineEnrollmentToken))
+	} else {
+		username, password, configured, err := keycloakPasswordCredentials()
 		if err != nil {
-			resp.Diagnostics.AddError("Failed to load AWS configuration", "Production machine enrollment uses ambient AWS credentials: "+err.Error())
+			resp.Diagnostics.AddError("Invalid pipeline authentication", err.Error())
 			return
 		}
-		if strings.TrimSpace(awsConfig.Region) == "" {
-			resp.Diagnostics.AddError("Missing AWS region", "Production machine enrollment requires a region in the standard AWS configuration chain, for example AWS_REGION or the active AWS profile.")
-			return
+		if configured {
+			client.tokenSource = &keycloakPasswordTokenSource{
+				authURL:    normalizeURL(machineEnrollmentAuthURL),
+				username:   username,
+				password:   password,
+				httpClient: client.httpClient,
+			}
+		} else {
+			client.tokenSource = &stegraCLITokenSource{authURL: normalizeURL(machineEnrollmentAuthURL)}
 		}
-		client.awsRegion = awsConfig.Region
-		client.awsCredentials = awsConfig.Credentials
 	}
 	if err := client.validateTransport(); err != nil {
 		resp.Diagnostics.AddError("Invalid provider transport", err.Error())
 		return
 	}
 	resp.ResourceData = client
+}
+
+func keycloakPasswordCredentials() (string, string, bool, error) {
+	username, usernameConfigured := os.LookupEnv("KEYCLOAK_USER")
+	password, passwordConfigured := os.LookupEnv("KEYCLOAK_PASSWORD")
+	if usernameConfigured != passwordConfigured {
+		return "", "", false, errors.New("KEYCLOAK_USER and KEYCLOAK_PASSWORD must be configured together")
+	}
+	if !usernameConfigured {
+		return "", "", false, nil
+	}
+	if strings.TrimSpace(username) == "" || password == "" {
+		return "", "", false, errors.New("KEYCLOAK_USER and KEYCLOAK_PASSWORD must not be empty")
+	}
+	return strings.TrimSpace(username), password, true, nil
 }
 
 func (p *stegraProvider) Resources(_ context.Context) []func() resource.Resource {

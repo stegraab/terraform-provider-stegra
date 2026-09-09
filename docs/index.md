@@ -11,15 +11,10 @@ resource registers machine identities with the machine-enrollment service.
 
 ## Production authentication
 
-Production enrollment uses the standard AWS credential chain. This supports
-environment credentials, AWS IAM Identity Center profiles, and workload or
-instance roles without placing credentials in Terraform configuration or state.
-
-For every broker operation, the provider signs an AWS STS `GetCallerIdentity`
-request using SigV4. The signed proof is bound to the broker URL, exact request
-method and URL, request-body hash, and a random nonce. The broker verifies those
-bindings, prevents nonce replay, calls AWS STS, and authorizes the returned IAM
-principal against its server-side policy.
+Production enrollment uses short-lived Stegra access tokens. The provider calls
+`stegra auth stegra` when it performs a registration operation and passes the
+result only in the HTTP Authorization header. The token is never written into
+Terraform configuration or state.
 
 Configure the shared machine-enrollment endpoint once per Terraform workspace.
 Nested resources inherit it through normal Terraform provider propagation:
@@ -27,19 +22,27 @@ Nested resources inherit it through normal Terraform provider propagation:
 ```hcl
 provider "stegra" {
   machine_enrollment_endpoint = "https://issuing-ca.example.internal/machine-enrollment"
+  machine_enrollment_auth_url = "https://auth.example.internal"
 }
 ```
 
-The provider intentionally has no AWS credential attributes. Select credentials
-using the standard AWS environment and shared-config mechanisms, such as
-`AWS_PROFILE`. A region must be available through that same chain.
+The Stegra CLI reuses a valid cached login and opens the normal browser login
+when necessary. The broker independently validates the token's signature,
+issuer, audience, lifetime, and administrator role.
 
-For local development only, set `machine_enrollment_token`. HTTP and
-`insecure_skip_verify` are rejected when using production AWS IAM authentication.
+In CI, the provider reuses the existing `KEYCLOAK_USER` and
+`KEYCLOAK_PASSWORD` runner credentials to obtain a short-lived `terraform-ci`
+token. The password is never sent to the enrollment service or stored in
+Terraform state.
+
+For local development only, set `machine_enrollment_token`. Static tokens are
+restricted to loopback endpoints. HTTP and `insecure_skip_verify` are rejected
+when using production OIDC authentication.
 
 Provider attributes can be supplied through their corresponding environment
 variables:
 
 - `STEGRA_MACHINE_ENROLLMENT_ENDPOINT`
+- `STEGRA_MACHINE_ENROLLMENT_AUTH_URL`
 - `STEGRA_MACHINE_ENROLLMENT_TOKEN`
 - `STEGRA_INSECURE_SKIP_VERIFY`

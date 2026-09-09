@@ -17,6 +17,9 @@ func TestProviderOwnsMachineEnrollmentEndpoint(t *testing.T) {
 	if _, found := response.Schema.Attributes["machine_enrollment_endpoint"]; !found {
 		t.Fatal("machine_enrollment_endpoint must be configured once on the provider")
 	}
+	if _, found := response.Schema.Attributes["machine_enrollment_auth_url"]; !found {
+		t.Fatal("machine_enrollment_auth_url must be configured once on the provider")
+	}
 }
 
 func TestNormalizeURL(t *testing.T) {
@@ -52,6 +55,33 @@ func TestConfigString(t *testing.T) {
 		value, ok := configString(types.StringNull(), "STEGRA_TEST_UNSET", "default")
 		if !ok || value != "default" {
 			t.Fatalf("value=%q ok=%v", value, ok)
+		}
+	})
+}
+
+func TestKeycloakPasswordCredentials(t *testing.T) {
+	t.Run("not configured", func(t *testing.T) {
+		_ = os.Unsetenv("KEYCLOAK_USER")
+		_ = os.Unsetenv("KEYCLOAK_PASSWORD")
+		_, _, configured, err := keycloakPasswordCredentials()
+		if err != nil || configured {
+			t.Fatalf("configured=%v error=%v", configured, err)
+		}
+	})
+	t.Run("configured", func(t *testing.T) {
+		t.Setenv("KEYCLOAK_USER", "infrastructure-as-code-runner")
+		t.Setenv("KEYCLOAK_PASSWORD", "secret")
+		username, password, configured, err := keycloakPasswordCredentials()
+		if err != nil || !configured || username != "infrastructure-as-code-runner" || password != "secret" {
+			t.Fatalf("username=%q configured=%v error=%v", username, configured, err)
+		}
+	})
+	t.Run("partial configuration", func(t *testing.T) {
+		t.Setenv("KEYCLOAK_USER", "infrastructure-as-code-runner")
+		_ = os.Unsetenv("KEYCLOAK_PASSWORD")
+		_, _, _, err := keycloakPasswordCredentials()
+		if err == nil {
+			t.Fatal("expected an error")
 		}
 	})
 }
