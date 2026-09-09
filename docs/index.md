@@ -31,7 +31,7 @@ when necessary. The broker independently validates the token's signature,
 issuer, audience, lifetime, and administrator role.
 
 In CI, the provider reuses the existing `KEYCLOAK_USER` and
-`KEYCLOAK_PASSWORD` runner credentials to obtain a short-lived `admin-cli`
+`KEYCLOAK_PASSWORD` runner credentials to obtain a short-lived `terraform-ci`
 token. The password is never sent to the enrollment service or stored in
 Terraform state.
 

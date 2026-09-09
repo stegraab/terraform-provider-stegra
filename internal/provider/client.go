@@ -44,7 +44,7 @@ type keycloakPasswordTokenSource struct {
 func (s *keycloakPasswordTokenSource) Token(ctx context.Context) (string, error) {
 	form := url.Values{
 		"grant_type": {"password"},
-		"client_id":  {"admin-cli"},
+		"client_id":  {"terraform-ci"},
 		"username":   {s.username},
 		"password":   {s.password},
 	}

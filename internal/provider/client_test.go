@@ -157,7 +157,7 @@ func TestKeycloakPasswordTokenSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := map[string]string{
-			"grant_type": "password", "client_id": "admin-cli",
+			"grant_type": "password", "client_id": "terraform-ci",
 			"username": "infrastructure-as-code-runner", "password": "pipeline-secret",
 		}
 		for key, value := range want {
