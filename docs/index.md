@@ -30,10 +30,12 @@ The Stegra CLI reuses a valid cached login and opens the normal browser login
 when necessary. The broker independently validates the token's signature,
 issuer, audience, lifetime, and administrator role.
 
-In CI, the provider reuses the existing `KEYCLOAK_USER` and
-`KEYCLOAK_PASSWORD` runner credentials to obtain a short-lived `terraform-ci`
-token. The password is never sent to the enrollment service or stored in
-Terraform state.
+In CI, configure `STEGRA_OAUTH_TOKEN_ENDPOINT`, `STEGRA_OAUTH_CLIENT_ID`, and
+`STEGRA_OAUTH_CLIENT_SECRET`. The provider uses the standard OAuth 2.0
+client-credentials grant and caches the short-lived access token for the
+Terraform process. It has no dependency on a particular authorization-server
+implementation. The client secret is never sent to the enrollment service or
+stored in Terraform state.
 
 For local development only, set `machine_enrollment_token`. Static tokens are
 restricted to loopback endpoints. HTTP and `insecure_skip_verify` are rejected
@@ -44,5 +46,8 @@ variables:
 
 - `STEGRA_MACHINE_ENROLLMENT_ENDPOINT`
 - `STEGRA_MACHINE_ENROLLMENT_AUTH_URL`
+- `STEGRA_OAUTH_TOKEN_ENDPOINT`
+- `STEGRA_OAUTH_CLIENT_ID`
+- `STEGRA_OAUTH_CLIENT_SECRET`
 - `STEGRA_MACHINE_ENROLLMENT_TOKEN`
 - `STEGRA_INSECURE_SKIP_VERIFY`

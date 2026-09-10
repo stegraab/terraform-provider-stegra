@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
 type apiClient struct {
@@ -36,43 +38,68 @@ type stegraCLITokenSource struct {
 	run     func(context.Context, string, ...string) ([]byte, error)
 }
 
-type keycloakPasswordTokenSource struct {
-	authURL, username, password string
-	httpClient                  *http.Client
+type oauthClientCredentialsTokenSource struct {
+	tokenEndpoint, clientID, clientSecret string
+	httpClient                            *http.Client
+
+	mu        sync.Mutex
+	token     string
+	expiresAt time.Time
+	now       func() time.Time
 }
 
-func (s *keycloakPasswordTokenSource) Token(ctx context.Context) (string, error) {
-	form := url.Values{
-		"grant_type": {"password"},
-		"client_id":  {"terraform-ci"},
-		"username":   {s.username},
-		"password":   {s.password},
+func (s *oauthClientCredentialsTokenSource) Token(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now
+	if s.now != nil {
+		now = s.now
 	}
-	endpoint := s.authURL + "/realms/master/protocol/openid-connect/token"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	if s.token != "" && now().Add(30*time.Second).Before(s.expiresAt) {
+		return s.token, nil
+	}
+
+	form := url.Values{
+		"grant_type":    {"client_credentials"},
+		"client_id":     {s.clientID},
+		"client_secret": {s.clientSecret},
+	}
+	token, expiresIn, err := requestOAuthToken(ctx, s.tokenEndpoint, form, s.httpClient)
 	if err != nil {
-		return "", fmt.Errorf("build Keycloak token request: %w", err)
+		return "", err
+	}
+	s.token = token
+	s.expiresAt = now().Add(expiresIn)
+	return token, nil
+}
+
+func requestOAuthToken(ctx context.Context, tokenEndpoint string, form url.Values, httpClient *http.Client) (string, time.Duration, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", 0, fmt.Errorf("build OAuth token request: %w", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	response, err := s.httpClient.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("obtain short-lived Keycloak access token: %w", err)
+		return "", 0, fmt.Errorf("obtain short-lived OAuth access token: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("obtain short-lived Keycloak access token: status %d", response.StatusCode)
+		return "", 0, fmt.Errorf("obtain short-lived OAuth access token: status %d", response.StatusCode)
 	}
 	var tokenResponse struct {
 		AccessToken string `json:"access_token"`
+		ExpiresIn   int64  `json:"expires_in"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&tokenResponse); err != nil {
-		return "", errors.New("Keycloak returned an invalid token response")
+		return "", 0, errors.New("OAuth authorization server returned an invalid token response")
 	}
 	if strings.TrimSpace(tokenResponse.AccessToken) == "" {
-		return "", errors.New("Keycloak returned no access token")
+		return "", 0, errors.New("OAuth authorization server returned no access token")
 	}
-	return strings.TrimSpace(tokenResponse.AccessToken), nil
+	return strings.TrimSpace(tokenResponse.AccessToken), time.Duration(tokenResponse.ExpiresIn) * time.Second, nil
 }
 
 func (s *stegraCLITokenSource) Token(ctx context.Context) (string, error) {
@@ -210,15 +237,15 @@ func (c *apiClient) validateTransport() error {
 	if c.insecureSkipVerify {
 		return errors.New("production machine enrollment requires TLS certificate verification")
 	}
-	var authURL string
+	var authenticationEndpoint string
 	switch source := c.tokenSource.(type) {
 	case *stegraCLITokenSource:
-		authURL = source.authURL
-	case *keycloakPasswordTokenSource:
-		authURL = source.authURL
+		authenticationEndpoint = source.authURL
+	case *oauthClientCredentialsTokenSource:
+		authenticationEndpoint = source.tokenEndpoint
 	}
-	if authURL != "" {
-		authEndpoint, err := parseHTTPURL(authURL)
+	if authenticationEndpoint != "" {
+		authEndpoint, err := parseHTTPURL(authenticationEndpoint)
 		if err != nil {
 			return fmt.Errorf("machine enrollment auth URL: %w", err)
 		}

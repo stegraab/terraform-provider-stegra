@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestMachineEnrollmentLifecycle(t *testing.T) {
@@ -147,48 +148,55 @@ func TestStegraCLITokenSourceDoesNotExposeOutputOnFailure(t *testing.T) {
 	}
 }
 
-func TestKeycloakPasswordTokenSource(t *testing.T) {
+func TestOAuthClientCredentialsTokenSourceCachesToken(t *testing.T) {
 	t.Parallel()
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/realms/master/protocol/openid-connect/token" {
-			t.Errorf("path=%q", request.URL.Path)
-		}
+		requests++
 		if err := request.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
 		want := map[string]string{
-			"grant_type": "password", "client_id": "terraform-ci",
-			"username": "infrastructure-as-code-runner", "password": "pipeline-secret",
+			"grant_type": "client_credentials",
+			"client_id":  "terraform-ci", "client_secret": "pipeline-secret",
 		}
 		for key, value := range want {
 			if request.Form.Get(key) != value {
 				t.Errorf("%s=%q", key, request.Form.Get(key))
 			}
 		}
-		_ = json.NewEncoder(writer).Encode(map[string]string{"access_token": "short-lived-token"})
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"access_token": "short-lived-token", "expires_in": 300,
+		})
 	}))
 	defer server.Close()
-	source := &keycloakPasswordTokenSource{
-		authURL: server.URL, username: "infrastructure-as-code-runner",
-		password: "pipeline-secret", httpClient: server.Client(),
+	now := time.Date(2026, time.September, 10, 12, 0, 0, 0, time.UTC)
+	source := &oauthClientCredentialsTokenSource{
+		tokenEndpoint: server.URL, clientID: "terraform-ci", clientSecret: "pipeline-secret",
+		httpClient: server.Client(), now: func() time.Time { return now },
 	}
-	token, err := source.Token(context.Background())
-	if err != nil || token != "short-lived-token" {
-		t.Fatalf("token=%q error=%v", token, err)
+	for range 2 {
+		token, err := source.Token(context.Background())
+		if err != nil || token != "short-lived-token" {
+			t.Fatalf("token=%q error=%v", token, err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d", requests)
 	}
 }
 
-func TestKeycloakPasswordTokenSourceDoesNotExposeResponse(t *testing.T) {
+func TestOAuthClientCredentialsTokenSourceDoesNotExposeResponse(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "must-not-appear", http.StatusUnauthorized)
 	}))
 	defer server.Close()
-	source := &keycloakPasswordTokenSource{
-		authURL: server.URL, username: "runner", password: "secret", httpClient: server.Client(),
+	source := &oauthClientCredentialsTokenSource{
+		tokenEndpoint: server.URL, clientID: "terraform-ci", clientSecret: "secret", httpClient: server.Client(),
 	}
 	_, err := source.Token(context.Background())
-	if err == nil || err.Error() != "obtain short-lived Keycloak access token: status 401" {
+	if err == nil || err.Error() != "obtain short-lived OAuth access token: status 401" {
 		t.Fatalf("error=%v", err)
 	}
 }
