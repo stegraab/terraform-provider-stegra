@@ -27,6 +27,7 @@ type stegraProviderModel struct {
 	MachineEnrollmentEndpoint types.String `tfsdk:"machine_enrollment_endpoint"`
 	MachineEnrollmentToken    types.String `tfsdk:"machine_enrollment_token"`
 	MachineEnrollmentAuthURL  types.String `tfsdk:"machine_enrollment_auth_url"`
+	OAuthTokenEndpoint        types.String `tfsdk:"oauth_token_endpoint"`
 	InsecureSkipVerify        types.Bool   `tfsdk:"insecure_skip_verify"`
 }
 
@@ -50,11 +51,15 @@ func (p *stegraProvider) Schema(_ context.Context, _ provider.SchemaRequest, res
 		"machine_enrollment_token": schema.StringAttribute{
 			Optional:    true,
 			Sensitive:   true,
-			Description: "Static machine-enrollment token for local development only. Production obtains a short-lived token with the Stegra CLI.",
+			Description: "Static machine-enrollment token for local development only. Production obtains a short-lived token through OIDC.",
 		},
 		"machine_enrollment_auth_url": schema.StringAttribute{
 			Optional:    true,
 			Description: "Stegra identity-provider base URL used by `stegra auth stegra` for production machine-enrollment authentication.",
+		},
+		"oauth_token_endpoint": schema.StringAttribute{
+			Optional:    true,
+			Description: "OAuth 2.0 token endpoint used with client credentials in non-interactive environments.",
 		},
 		"insecure_skip_verify": schema.BoolAttribute{
 			Optional:    true,
@@ -85,6 +90,11 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		resp.Diagnostics.AddError("Invalid provider configuration", "`machine_enrollment_auth_url` is unknown")
 		return
 	}
+	oauthTokenEndpoint, ok := configString(data.OAuthTokenEndpoint, "STEGRA_OAUTH_TOKEN_ENDPOINT", "")
+	if !ok {
+		resp.Diagnostics.AddError("Invalid provider configuration", "`oauth_token_endpoint` is unknown")
+		return
+	}
 	insecureSkipVerify, ok := configBool(data.InsecureSkipVerify, "STEGRA_INSECURE_SKIP_VERIFY", false)
 	if !ok {
 		resp.Diagnostics.AddError("Invalid provider configuration", "`insecure_skip_verify` is unknown")
@@ -109,17 +119,21 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 	if strings.TrimSpace(machineEnrollmentToken) != "" {
 		client.tokenSource = staticTokenSource(strings.TrimSpace(machineEnrollmentToken))
 	} else {
-		username, password, configured, err := keycloakPasswordCredentials()
+		clientID, clientSecret, clientCredentialsConfigured, err := oauthClientCredentials()
 		if err != nil {
 			resp.Diagnostics.AddError("Invalid pipeline authentication", err.Error())
 			return
 		}
-		if configured {
-			client.tokenSource = &keycloakPasswordTokenSource{
-				authURL:    normalizeURL(machineEnrollmentAuthURL),
-				username:   username,
-				password:   password,
-				httpClient: client.httpClient,
+		if clientCredentialsConfigured {
+			if strings.TrimSpace(oauthTokenEndpoint) == "" {
+				resp.Diagnostics.AddError("Missing pipeline authentication", "`oauth_token_endpoint` must be configured with OAuth client credentials")
+				return
+			}
+			client.tokenSource = &oauthClientCredentialsTokenSource{
+				tokenEndpoint: normalizeURL(oauthTokenEndpoint),
+				clientID:      clientID,
+				clientSecret:  clientSecret,
+				httpClient:    client.httpClient,
 			}
 		} else {
 			client.tokenSource = &stegraCLITokenSource{authURL: normalizeURL(machineEnrollmentAuthURL)}
@@ -132,19 +146,19 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 	resp.ResourceData = client
 }
 
-func keycloakPasswordCredentials() (string, string, bool, error) {
-	username, usernameConfigured := os.LookupEnv("KEYCLOAK_USER")
-	password, passwordConfigured := os.LookupEnv("KEYCLOAK_PASSWORD")
-	if usernameConfigured != passwordConfigured {
-		return "", "", false, errors.New("KEYCLOAK_USER and KEYCLOAK_PASSWORD must be configured together")
+func oauthClientCredentials() (string, string, bool, error) {
+	clientID, clientIDConfigured := os.LookupEnv("STEGRA_OAUTH_CLIENT_ID")
+	clientSecret, clientSecretConfigured := os.LookupEnv("STEGRA_OAUTH_CLIENT_SECRET")
+	if clientIDConfigured != clientSecretConfigured {
+		return "", "", false, errors.New("STEGRA_OAUTH_CLIENT_ID and STEGRA_OAUTH_CLIENT_SECRET must be configured together")
 	}
-	if !usernameConfigured {
+	if !clientIDConfigured {
 		return "", "", false, nil
 	}
-	if strings.TrimSpace(username) == "" || password == "" {
-		return "", "", false, errors.New("KEYCLOAK_USER and KEYCLOAK_PASSWORD must not be empty")
+	if strings.TrimSpace(clientID) == "" || clientSecret == "" {
+		return "", "", false, errors.New("STEGRA_OAUTH_CLIENT_ID and STEGRA_OAUTH_CLIENT_SECRET must not be empty")
 	}
-	return strings.TrimSpace(username), password, true, nil
+	return strings.TrimSpace(clientID), clientSecret, true, nil
 }
 
 func (p *stegraProvider) Resources(_ context.Context) []func() resource.Resource {
