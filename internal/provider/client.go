@@ -118,7 +118,7 @@ func (s *stegraCLITokenSource) Token(ctx context.Context) (string, error) {
 		"--base-url",
 		s.authURL,
 		"--realm",
-		"master",
+		"public",
 		"--client-id",
 		"stegra-cli",
 		"--token-only",

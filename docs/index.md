@@ -26,16 +26,18 @@ provider "stegra" {
 }
 ```
 
-The Stegra CLI reuses a valid cached login and opens the normal browser login
-when necessary. The broker independently validates the token's signature,
-issuer, audience, lifetime, and administrator role.
+The Stegra CLI reuses a valid cached login in the `public` realm and opens the
+normal browser login when necessary. The broker independently validates the
+token's signature, issuer, dedicated `machine-enrollment` audience, lifetime,
+authorized party, and `machine-enrollment:administrator` client role. It never
+receives a Keycloak `master`-realm administrator token.
 
 In CI, configure `STEGRA_OAUTH_TOKEN_ENDPOINT`, `STEGRA_OAUTH_CLIENT_ID`, and
 `STEGRA_OAUTH_CLIENT_SECRET`. The provider uses the standard OAuth 2.0
-client-credentials grant and caches the short-lived access token for the
-Terraform process. It has no dependency on a particular authorization-server
-implementation. The client secret is never sent to the enrollment service or
-stored in Terraform state.
+client-credentials grant against the environment's `public` realm and caches
+the five-minute access token for the Terraform process. It has no dependency
+on a particular authorization-server implementation. The client secret is
+never sent to the enrollment service or stored in Terraform state.
 
 For local development only, set `machine_enrollment_token`. Static tokens are
 restricted to loopback endpoints. HTTP and `insecure_skip_verify` are rejected

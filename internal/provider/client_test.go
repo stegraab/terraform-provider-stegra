@@ -121,7 +121,7 @@ func TestStegraCLITokenSource(t *testing.T) {
 		t.Fatalf("command=%q", gotName)
 	}
 	wantArguments := []string{
-		"auth", "stegra", "--base-url", "https://auth.example.internal", "--realm", "master",
+		"auth", "stegra", "--base-url", "https://auth.example.internal", "--realm", "public",
 		"--client-id", "stegra-cli", "--token-only",
 	}
 	if len(gotArguments) != len(wantArguments) {
