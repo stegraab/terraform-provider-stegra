@@ -18,6 +18,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.15.5
+          terraform_wrapper: false
       - name: Check formatting
         shell: bash
         run: test -z "$(gofmt -l .)"
@@ -27,3 +31,25 @@ jobs:
       - name: Test
         shell: bash
         run: go test -race ./...
+      - name: Build provider for Terraform tests
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/stegra-provider"
+          go build -o "$RUNNER_TEMP/stegra-provider/terraform-provider-stegra" .
+          {
+            echo 'provider_installation {'
+            echo '  dev_overrides {'
+            echo "    \"stegraab/stegra\" = \"$RUNNER_TEMP/stegra-provider\""
+            echo '  }'
+            echo '  direct {}'
+            echo '}'
+          } > "$RUNNER_TEMP/stegra.tfrc"
+      - name: Terraform integration tests
+        shell: bash
+        env:
+          TF_CLI_CONFIG_FILE: ${{ runner.temp }}/stegra.tfrc
+        run: |
+          for example in examples/rotation/local examples/rotation/gitlab examples/rotation/aws-write-only; do
+            terraform -chdir="$example" init -backend=false -input=false
+            terraform -chdir="$example" test
+          done

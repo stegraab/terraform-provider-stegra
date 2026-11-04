@@ -45,7 +45,7 @@ func (p *stegraProvider) Metadata(_ context.Context, _ provider.MetadataRequest,
 func (p *stegraProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{Attributes: map[string]schema.Attribute{
 		"machine_enrollment_endpoint": schema.StringAttribute{
-			Required:    true,
+			Optional:    true,
 			Description: "Shared Stegra machine-enrollment API base URL for resources managed by this provider.",
 		},
 		"machine_enrollment_token": schema.StringAttribute{
@@ -101,7 +101,7 @@ func (p *stegraProvider) Configure(ctx context.Context, req provider.ConfigureRe
 		return
 	}
 	if strings.TrimSpace(machineEnrollmentEndpoint) == "" {
-		resp.Diagnostics.AddError("Missing provider configuration", "`machine_enrollment_endpoint` must be configured")
+		resp.ResourceData = missingMachineEnrollmentConfig{}
 		return
 	}
 
@@ -162,7 +162,7 @@ func oauthClientCredentials() (string, string, bool, error) {
 }
 
 func (p *stegraProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{NewMachineEnrollmentResource}
+	return []func() resource.Resource{NewMachineEnrollmentResource, NewRotationResource}
 }
 
 func (p *stegraProvider) DataSources(_ context.Context) []func() datasource.DataSource {
