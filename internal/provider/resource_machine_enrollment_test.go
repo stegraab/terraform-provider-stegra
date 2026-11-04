@@ -10,6 +10,19 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
+func TestMachineEnrollmentConfigureAllowsValidationButRequiresEndpoint(t *testing.T) {
+	var validation frameworkresource.ConfigureResponse
+	(&machineEnrollmentResource{}).Configure(context.Background(), frameworkresource.ConfigureRequest{}, &validation)
+	if validation.Diagnostics.HasError() {
+		t.Fatalf("unconfigured validation should succeed: %v", validation.Diagnostics)
+	}
+	var configured frameworkresource.ConfigureResponse
+	(&machineEnrollmentResource{}).Configure(context.Background(), frameworkresource.ConfigureRequest{ProviderData: missingMachineEnrollmentConfig{}}, &configured)
+	if !configured.Diagnostics.HasError() {
+		t.Fatal("using machine enrollment without an endpoint must fail")
+	}
+}
+
 func TestMachineEnrollmentV0StateDropsResourceEndpoint(t *testing.T) {
 	t.Parallel()
 	for name, endpoint := range map[string]types.String{

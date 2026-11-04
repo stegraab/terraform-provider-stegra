@@ -25,6 +25,8 @@ type machineEnrollmentResource struct {
 	client *apiClient
 }
 
+type missingMachineEnrollmentConfig struct{}
+
 type machineEnrollmentResourceModel struct {
 	ID               types.String `tfsdk:"id"`
 	AttestorType     types.String `tfsdk:"attestor_type"`
@@ -132,6 +134,10 @@ func (r *machineEnrollmentResource) UpgradeState(ctx context.Context) map[int64]
 
 func (r *machineEnrollmentResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
+		return
+	}
+	if _, missing := req.ProviderData.(missingMachineEnrollmentConfig); missing {
+		resp.Diagnostics.AddError("Missing machine-enrollment provider configuration", "Configure machine_enrollment_endpoint before using stegra_machine_enrollment.")
 		return
 	}
 	client, ok := req.ProviderData.(*apiClient)
