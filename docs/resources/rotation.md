@@ -50,7 +50,9 @@ schedule, with acknowledgement required between rotations.
 
 Use `slots` directly with `for_each`, and use `each.value.generation` as a
 `keeper` or replacement trigger. `each.value.expires_at` is stable
-for that generation and advances only when its slot rotates. Secret values used by
+for that generation and advances only when its slot rotates. For APIs that take
+a relative duration, use `each.value.lifetime_seconds` and round up to the unit
+required by the API. Secret values used by
 ordinary resources remain in Terraform state.
 See `examples/rotation/local` and `examples/rotation/gitlab`.
 
@@ -80,7 +82,9 @@ consumers need to converge safely across retries. See
 - `generation` — global rotation-event counter. Do not use it as a per-slot
   write-only version; use `slots[*].generation`.
 - `slots` — iterable map keyed from `"0"` through `"size-1"`. Each value contains
-  a numeric `generation` and stable RFC3339 `expires_at` timestamp.
+  a numeric `generation`, a stable RFC3339 `expires_at` timestamp, and the
+  requested `lifetime_seconds` rounded up to a whole second. Generations from
+  older provider versions gain a lifetime value when their slot next rotates.
 - `active_slot`, `active_generation` — currently preferred credential.
 - `rollout_pending`, `rollout_deadline` — acknowledgement status and deadline
   for the preferred generation.

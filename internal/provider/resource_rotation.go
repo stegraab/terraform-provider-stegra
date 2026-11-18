@@ -18,6 +18,7 @@ import (
 
 var (
 	_ resource.Resource                   = &rotationResource{}
+	_ resource.ResourceWithUpgradeState   = &rotationResource{}
 	_ resource.ResourceWithModifyPlan     = &rotationResource{}
 	_ resource.ResourceWithValidateConfig = &rotationResource{}
 )
@@ -52,8 +53,9 @@ type rotationPolicy struct {
 }
 
 var rotationSlotAttributeTypes = map[string]attr.Type{
-	"generation": types.Int64Type,
-	"expires_at": types.StringType,
+	"generation":       types.Int64Type,
+	"expires_at":       types.StringType,
+	"lifetime_seconds": types.Int64Type,
 }
 
 var rotationSlotType = types.ObjectType{AttrTypes: rotationSlotAttributeTypes}
@@ -72,6 +74,7 @@ func (r *rotationResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 
 func rotationSchema() schema.Schema {
 	return schema.Schema{
+		Version:     1,
 		Description: "Coordinates multi-slot credential rotation using numeric generations. It never stores secret material.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -111,7 +114,7 @@ func rotationSchema() schema.Schema {
 			},
 			"slots": schema.MapNestedAttribute{
 				Computed:    true,
-				Description: "Iterable map of stable slot generations and requested expiration timestamps, suitable for direct use with for_each.",
+				Description: "Iterable map of stable slot generations and requested expiration timestamps and lifetimes, suitable for direct use with for_each.",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"generation": schema.Int64Attribute{
@@ -121,6 +124,10 @@ func rotationSchema() schema.Schema {
 						"expires_at": schema.StringAttribute{
 							Computed:    true,
 							Description: "Stable RFC3339 expiration requested from the downstream credential resource for this slot generation.",
+						},
+						"lifetime_seconds": schema.Int64Attribute{
+							Computed:    true,
+							Description: "Stable requested lifetime in seconds, rounded up, for APIs that accept durations rather than absolute expiration. Null for generations created before this attribute was introduced.",
 						},
 					},
 				},
@@ -149,6 +156,36 @@ func rotationSchema() schema.Schema {
 			"next_rotation_at": schema.StringAttribute{
 				Computed:    true,
 				Description: "Next planned one-slot rotation in RFC3339 format.",
+			},
+		},
+	}
+}
+
+func (r *rotationResource) UpgradeState(context.Context) map[int64]resource.StateUpgrader {
+	priorSchema := rotationSchema()
+	priorSchema.Version = 0
+	slots := priorSchema.Attributes["slots"].(schema.MapNestedAttribute)
+	delete(slots.NestedObject.Attributes, "lifetime_seconds")
+
+	return map[int64]resource.StateUpgrader{
+		0: {
+			PriorSchema: &priorSchema,
+			StateUpgrader: func(ctx context.Context, req resource.UpgradeStateRequest, resp *resource.UpgradeStateResponse) {
+				var state rotationResourceModel
+				resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+				if resp.Diagnostics.HasError() {
+					return
+				}
+				if !state.Slots.IsNull() {
+					elements := state.Slots.Elements()
+					for key, value := range elements {
+						attributes := value.(types.Object).Attributes()
+						attributes["lifetime_seconds"] = types.Int64Null()
+						elements[key] = types.ObjectValueMust(rotationSlotAttributeTypes, attributes)
+					}
+					state.Slots = types.MapValueMust(rotationSlotType, elements)
+				}
+				resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 			},
 		},
 	}
@@ -499,9 +536,14 @@ func initializeRotation(model *rotationResourceModel, size int64, expiresAt type
 }
 
 func rotationSlotValue(generation int64, expiresAt types.String) types.Object {
+	lifetime := types.Int64Null()
+	if expiresAt.IsUnknown() {
+		lifetime = types.Int64Unknown()
+	}
 	return types.ObjectValueMust(rotationSlotAttributeTypes, map[string]attr.Value{
-		"generation": types.Int64Value(generation),
-		"expires_at": expiresAt,
+		"generation":       types.Int64Value(generation),
+		"expires_at":       expiresAt,
+		"lifetime_seconds": lifetime,
 	})
 }
 
@@ -528,9 +570,15 @@ func resolveUnknownExpirations(model *rotationResourceModel, policy rotationPoli
 					expiresAfter = policy.rotateBefore + time.Duration(slot)*policy.interval
 				}
 			}
-			expiration = expirationValue(now.Add(expiresAfter))
+			seconds := int64(expiresAfter / time.Second)
+			if expiresAfter%time.Second != 0 {
+				seconds++
+			}
+			attributes["expires_at"] = expirationValue(now.Add(expiresAfter))
+			attributes["lifetime_seconds"] = types.Int64Value(seconds)
+			value = types.ObjectValueMust(rotationSlotAttributeTypes, attributes)
 		}
-		elements[key] = rotationSlotValue(attributes["generation"].(types.Int64).ValueInt64(), expiration)
+		elements[key] = value
 	}
 	model.Slots = types.MapValueMust(rotationSlotType, elements)
 }

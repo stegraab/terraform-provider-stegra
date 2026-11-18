@@ -158,6 +158,10 @@ func slotExpiresAt(model rotationResourceModel, slot string) string {
 	return model.Slots.Elements()[slot].(types.Object).Attributes()["expires_at"].(types.String).ValueString()
 }
 
+func slotLifetimeSeconds(model rotationResourceModel, slot string) types.Int64 {
+	return model.Slots.Elements()[slot].(types.Object).Attributes()["lifetime_seconds"].(types.Int64)
+}
+
 func TestResolveUnknownExpirationsOnce(t *testing.T) {
 	t.Parallel()
 	resolvedAt := time.Date(2026, time.December, 23, 12, 0, 0, 0, time.UTC)
@@ -176,9 +180,27 @@ func TestResolveUnknownExpirationsOnce(t *testing.T) {
 		t.Fatalf("staggered expires_at=%q, want %q", got, want)
 	}
 
+	if got, want := slotLifetimeSeconds(state, "0").ValueInt64(), int64(90*24*60*60); got != want {
+		t.Fatalf("initial primary lifetime=%d, want %d", got, want)
+	}
+	if got, want := slotLifetimeSeconds(state, "1").ValueInt64(), int64(60*24*60*60); got != want {
+		t.Fatalf("initial standby lifetime=%d, want %d", got, want)
+	}
+
+	slots := state.Slots
+	policy.period = 180 * 24 * time.Hour
 	resolveUnknownExpirations(&state, policy, resolvedAt.Add(24*time.Hour))
-	if got, want := slotExpiresAt(state, "0"), resolvedAt.Add(policy.period).Format(time.RFC3339Nano); got != want {
-		t.Fatalf("resolved expiration changed from %q to %q", want, got)
+	if !state.Slots.Equal(slots) {
+		t.Fatal("existing slot expiration or lifetime changed after a policy update")
+	}
+
+	advanceRotation(&state, types.StringUnknown())
+	resolveUnknownExpirations(&state, policy, resolvedAt.Add(30*24*time.Hour))
+	if got, want := slotLifetimeSeconds(state, "1").ValueInt64(), int64(180*24*60*60); got != want {
+		t.Fatalf("replacement lifetime=%d, want %d", got, want)
+	}
+	if !state.Slots.Elements()["0"].Equal(slots.Elements()["0"]) {
+		t.Fatal("untouched slot changed during rotation")
 	}
 }
 
