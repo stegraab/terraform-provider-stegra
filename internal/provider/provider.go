@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -163,6 +164,10 @@ func oauthClientCredentials() (string, string, bool, error) {
 
 func (p *stegraProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{NewMachineEnrollmentResource, NewRotationResource}
+}
+
+func (p *stegraProvider) EphemeralResources(_ context.Context) []func() ephemeral.EphemeralResource {
+	return []func() ephemeral.EphemeralResource{NewOIDCIDTokenResource}
 }
 
 func (p *stegraProvider) DataSources(_ context.Context) []func() datasource.DataSource {
